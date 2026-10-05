@@ -4,7 +4,7 @@
 #
 # network_mode: host es IMPRESCINDIBLE para el descubrimiento de Google Cast (mDNS
 # multicast). Con host-net, la directiva `ports:` se ignora: la API queda publicada
-# directamente en el host del NUC en JARVIS_PORT (8200).
+# directamente en el host en JARVIS_PORT (8200 por defecto; cámbialo en .env).
 services:
   jarvis:
     build: .
@@ -16,10 +16,12 @@ services:
       # Zona horaria local del proceso: el núcleo inyecta datetime.now() en cada
       # prompt para que Jarvis sepa la hora. Sin esto el contenedor corre en UTC.
       # Requiere tzdata en la imagen (instalado en el Dockerfile).
-      TZ: Europe/Madrid
+      TZ: ${TZ:-Europe/Madrid}
       # La API escucha en todas las interfaces del host, en el puerto del stack.
+      # El puerto sale del .env (interpolación de compose) para poder cambiarlo
+      # sin tocar este fichero; el healthcheck y el satélite usan el mismo valor.
       JARVIS_HOST: 0.0.0.0
-      JARVIS_PORT: 8200
+      JARVIS_PORT: ${JARVIS_PORT:-8200}
       # STT server-side (CPU i7-8809G = 4 núcleos / 8 hilos, sin GPU).
       # Historial: `small` → `medium` (2026-06-25, mejor calidad ES, coste CPU
       # asumible) → `large-v3-turbo` (2026-07-02, prueba) → `medium` (2026-07-02,
@@ -45,7 +47,8 @@ services:
       - jarvis-data:/app/data
     healthcheck:
       # urllib en lugar de curl para no instalar binarios extra en la imagen.
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8200/health').status==200 else 1)"]
+      # Lee JARVIS_PORT del entorno del contenedor (no hay shell que expanda $VAR).
+      test: ["CMD", "python", "-c", "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('JARVIS_PORT','8200')).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -67,7 +70,7 @@ services:
       context: .
       dockerfile: Dockerfile.satellite
     container_name: jarvis-satellite
-    network_mode: host          # habla al núcleo por 127.0.0.1:8200 (host-net)
+    network_mode: host          # habla al núcleo por 127.0.0.1:JARVIS_PORT (host-net)
     # Fase 3: servicio permanente (modo `run`, wake word) → se reinicia solo.
     restart: unless-stopped
     depends_on:
@@ -78,7 +81,7 @@ services:
       # Fase 3: máquina de estados con wake word ("Hey Jarvis" → captura → Cast).
       # Para revalidar el pipe sin wake usar JARVIS_SAT_MODE: test-once.
       JARVIS_SAT_MODE: run
-      JARVIS_SAT_WS_URL: ws://127.0.0.1:8200/voice
+      JARVIS_SAT_WS_URL: ws://127.0.0.1:${JARVIS_PORT:-8200}/voice
       JARVIS_SAT_CAST_DEVICE: Salón
       JARVIS_SAT_INPUT_DEVICE: Camera    # substring del device de la PS Eye (PortAudio: "USB Camera-B4.09.24.1")
       # Ganancia software SOLO para wake/VAD (los detectores). La PS Eye entrega

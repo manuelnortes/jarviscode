@@ -74,6 +74,7 @@ cp .env.example .env
 # Fill in CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), JARVIS_USER_NAME and the capabilities you want.
 docker compose up -d --build jarvis
 # Web UI and API on http://<host>:8200  ·  health check: GET /health
+# Port in use? Set JARVIS_PORT=<port> (and TZ if you are not in Europe/Madrid) in .env.
 ```
 
 The compose file uses `network_mode: host` so Cast/mDNS discovery works. The Whisper model is

@@ -72,6 +72,7 @@ cp .env.example .env
 # Rellena CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), JARVIS_USER_NAME y las capacidades que quieras.
 docker compose up -d --build jarvis
 # UI web y API en http://<host>:8200  ·  health check: GET /health
+# ¿Puerto ocupado? Define JARVIS_PORT=<puerto> (y TZ si no estás en Europe/Madrid) en .env.
 ```
 
 El compose usa `network_mode: host` para que funcione el descubrimiento Cast/mDNS. El modelo de
