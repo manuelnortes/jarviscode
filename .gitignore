@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Entorno / secretos
+.env
+*.token
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Voz (Hito 3): binario de Piper y modelos de voz — se descargan, no se versionan.
+piper/
+voices/
+
+# Datos de capacidades en dev (BD de recordatorios, cache de Spotify futura).
+data/

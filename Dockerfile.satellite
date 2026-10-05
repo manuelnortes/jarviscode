@@ -1,0 +1,43 @@
+# === Imagen del satélite de voz ambiente (Hito 3.5+4) ===
+#
+# Contenedor independiente del núcleo: captura de la PS Eye + (Fase 3) wake word
+# + cliente WS del protocolo /voice. NO lleva la pila pesada del núcleo (Claude
+# CLI, Piper, faster-whisper): el STT/TTS ocurre en el contenedor `jarvis`.
+#
+# Base Debian slim (NO alpine): onnxruntime y las wheels de audio son mucho más
+# fiables sobre glibc que sobre musl.
+FROM python:3.13-slim
+
+# libportaudio2 = runtime de PortAudio para `sounddevice`; alsa-utils para depurar
+# la captura (arecord -l) dentro del contenedor si hace falta.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libportaudio2 alsa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Dependencias del satélite (Fase 3, modo run): captura + WS + wake word + VAD.
+# `openwakeword` trae el modelo `hey_jarvis` (ONNX) y **empaqueta el Silero VAD**
+# (`openwakeword.vad`), que corre en `onnxruntime` — así NO hace falta compilar
+# nada (se descartó `pysilero-vad`, que tira de CMake). Por eso la imagen sigue
+# sin build tooling (build-essential/cmake).
+RUN pip install --no-cache-dir \
+      sounddevice \
+      numpy \
+      websockets \
+      openwakeword \
+      onnxruntime
+
+# openWakeWord 0.4.x **empaqueta** los .onnx preentrenados dentro del propio
+# paquete (hey_jarvis + melspectrogram/embedding base + silero_vad.onnx), así que
+# NO hace falta pre-descargar nada en build (la vieja `openwakeword.utils.
+# download_models()` desapareció en 0.4.x). Se resuelven por
+# `openwakeword.get_pretrained_model_paths()` en runtime.
+
+# Solo el paquete del satélite necesita ir en la imagen; se copia src/ entero por
+# simplicidad (el satélite no importa src.core, así que nada pesado se activa).
+COPY src/ ./src/
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "src.satellite.main"]

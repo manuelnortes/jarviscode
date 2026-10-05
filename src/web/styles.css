@@ -1,0 +1,931 @@
+/* ============================================================================
+ * JARVIS — UI de voz responsive (Hito 3.6)
+ * Concepto A (HUD escritorio) + C (Voz móvil) fundidos en una sola página.
+ * Tokens de color/tipografía tomados del handoff de diseño.
+ * ==========================================================================*/
+
+:root {
+  /* Color */
+  --cyan: #22d3ee;
+  --cyan-deep: #0e7490;
+  --cyan-light: #8cf0ff;
+  --text: #e8f1f4;
+  --text-2: #cfe0e6;
+  --muted: #90a0a9;
+  --muted-2: #7e8d97;
+  --mono-dim: #5f6f79;
+  --mono-dimmer: #4d5b64;
+  --bd-cyan: rgba(34, 211, 238, 0.14);
+  --bd-cyan-soft: rgba(34, 211, 238, 0.12);
+  --bd-neutral: rgba(255, 255, 255, 0.06);
+  --fill-cyan: rgba(34, 211, 238, 0.10);
+  --panel: rgba(8, 16, 22, 0.55);
+
+  /* Tipografía */
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-display);
+  color: var(--text);
+  background: radial-gradient(120% 90% at 50% 30%, #0a1219, #060a0f 60%, #04070a);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Layout raíz ─────────────────────────────────────────────────────────── */
+
+.app {
+  position: relative;
+  height: 100dvh;
+  display: grid;
+  grid-template-columns: 236px 1fr;
+  transition: grid-template-columns 0.32s ease;
+}
+
+/* Historial plegado (escritorio): la columna se contrae a 0 */
+.app.history-collapsed { grid-template-columns: 0 1fr; }
+
+/* ── Panel de historial ──────────────────────────────────────────────────── */
+
+.history {
+  margin: 22px 0 22px 22px;
+  padding: 14px 12px;
+  background: var(--panel);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--bd-cyan-soft);
+  border-radius: 6px;
+  overflow: hidden auto;
+  transition: opacity 0.24s ease, transform 0.24s ease;
+  min-width: 0;
+}
+
+.app.history-collapsed .history {
+  opacity: 0;
+  transform: translateX(-12px);
+  pointer-events: none;
+}
+
+.history__grabber { display: none; }
+
+.history__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.history__title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--muted-2);
+}
+
+.history__toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 4px;
+}
+.history__toggle:hover { color: var(--cyan); }
+
+.history__list { list-style: none; margin: 0; padding: 0; }
+
+.history__item {
+  padding: 9px 10px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.history__item:hover { background: rgba(255, 255, 255, 0.03); }
+.history__item.is-active {
+  background: var(--fill-cyan);
+  border-left-color: var(--cyan);
+}
+
+.history__item-title {
+  font-size: 12.5px;
+  color: var(--text-2);
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history__item-time {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--mono-dim);
+}
+
+/* ── Escenario ───────────────────────────────────────────────────────────── */
+
+.stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 22px 28px 26px;
+  min-width: 0;
+  /* Altura fija (celda del grid = 100dvh): la topbar y la barra de entrada
+     quedan ancladas y la zona central (.stage__main) absorbe el desbordamiento. */
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Zona central flexible: centra el orbe cuando hay sitio y hace scroll cuando la
+   respuesta es larga, en vez de empujar la barra de entrada fuera de pantalla.
+   `safe center` evita que el contenido se recorte por arriba al desbordar. */
+.stage__main {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: safe center;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-cyan) transparent;
+}
+.stage__main::-webkit-scrollbar { width: 6px; }
+.stage__main::-webkit-scrollbar-thumb {
+  background: var(--bd-cyan);
+  border-radius: 3px;
+}
+
+.topbar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.topbar__id { display: flex; align-items: center; gap: 10px; }
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 11px var(--cyan);
+}
+
+.brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.chip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  color: var(--cyan);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 5px;
+  padding: 3px 8px;
+}
+
+.topbar__clock {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--muted-2);
+}
+
+/* Orbe + anillos */
+.orbwrap {
+  position: relative;
+  width: 340px;
+  height: 340px;
+  flex: 0 0 auto;
+  /* Los anillos son cajas cuadradas que, al rotar, agrandan su bounding box (a
+     45° mide ~√2× el lado). Los navegadores cuentan ese desbordamiento para el
+     área de scroll, así que cada giro hacía parpadear la barra de scroll de
+     .stage__main. Recortar aquí lo contiene; los anillos son círculos inscritos,
+     así que las esquinas recortadas están vacías y no se nota visualmente. */
+  overflow: hidden;
+}
+
+.rings { position: absolute; inset: 0; }
+.ring {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 50%;
+  border: 1px solid transparent;
+}
+.ring--1 {
+  width: 100%; height: 100%;
+  border-top-color: rgba(34, 211, 238, 0.30);
+  animation: spin 9s linear infinite;
+}
+.ring--2 {
+  width: 78%; height: 78%;
+  border-right-color: rgba(34, 211, 238, 0.22);
+  animation: spinr 13s linear infinite;
+}
+.ring--3 {
+  width: 56%; height: 56%;
+  border-bottom-color: rgba(34, 211, 238, 0.16);
+  animation: spin 22s linear infinite;
+}
+
+.orb-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Forma de onda */
+.waveform {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 34px;
+  margin-top: 6px;
+}
+.waveform span {
+  width: 3px;
+  height: 100%;
+  background: linear-gradient(var(--cyan), var(--cyan-deep));
+  border-radius: 2px;
+  transform-origin: bottom;
+  transform: scaleY(0.2);
+  animation: wave 1.1s ease-in-out infinite;
+  opacity: 0.85;
+}
+.waveform span:nth-child(1) { animation-delay: 0.1s; }
+.waveform span:nth-child(2) { animation-delay: 0.3s; }
+.waveform span:nth-child(3) { animation-delay: 0.5s; }
+.waveform span:nth-child(4) { animation-delay: 0.2s; }
+.waveform span:nth-child(5) { animation-delay: 0.6s; }
+.waveform span:nth-child(6) { animation-delay: 0.4s; }
+.waveform span:nth-child(7) { animation-delay: 0.15s; }
+
+/* En reposo la onda casi no se mueve; al escuchar/hablar app.js la alimenta */
+.app[data-mode="idle"] .waveform span,
+.app[data-mode="thinking"] .waveform span {
+  animation-play-state: paused;
+  transform: scaleY(0.18);
+}
+
+/* Transcripción */
+.transcript {
+  text-align: center;
+  margin-top: 18px;
+  width: 100%;
+  max-width: 640px;
+}
+.transcript__text {
+  font-size: 24px;
+  font-weight: 300;
+  line-height: 1.4;
+  color: var(--text);
+  margin: 0;
+  /* Las URLs largas no se pueden partir entre palabras: sin esto el elemento
+     crece hasta el ancho de la URL, se sale del viewport y, al estar centrado,
+     se recorta por ambos lados (se comía la "M" de Murcia). */
+  overflow-wrap: anywhere;
+}
+.transcript__status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--cyan);
+  margin: 10px 0 0;
+  min-height: 14px;
+  text-transform: uppercase;
+}
+
+/* Botón "Para de hablar" (barge-in por GUI). Solo aparece mientras Jarvis piensa
+   o habla; mismo lenguaje mono/cyan que .chip, con el cuadrado de "stop". */
+.stopbtn {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 7px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  background: var(--fill-cyan);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: box-shadow 0.18s ease, background 0.18s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.app[data-mode="thinking"] .stopbtn,
+.app[data-mode="speaking"] .stopbtn { display: inline-flex; }
+.stopbtn:hover {
+  background: rgba(34, 211, 238, 0.18);
+  box-shadow: 0 0 22px rgba(34, 211, 238, 0.35);
+}
+.stopbtn__icon {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--cyan);
+}
+
+/* Indicador "escribiendo" */
+.typing {
+  display: none;
+  gap: 6px;
+  margin-top: 12px;
+}
+.app[data-mode="thinking"] .typing { display: flex; }
+.typing span {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.35;
+  animation: drift 1.2s ease-in-out infinite;
+}
+.typing span:nth-child(2) { animation-delay: 0.2s; }
+.typing span:nth-child(3) { animation-delay: 0.4s; }
+
+/* Barra de entrada (píldora) — anclada abajo; .stage__main absorbe el alto. */
+.inputbar {
+  flex: 0 0 auto;
+  margin-top: 16px;
+  width: min(560px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 7px 7px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--bd-neutral);
+  border-radius: 40px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.mini-orb {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+}
+
+.inputbar__field {
+  flex: 1 1 auto;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 15px;
+  min-width: 0;
+}
+.inputbar__field::placeholder { color: var(--muted-2); }
+
+.mic {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: var(--cyan);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: box-shadow 0.18s ease, transform 0.1s ease;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+.mic:hover { box-shadow: 0 0 30px rgba(34, 211, 238, 0.55); }
+.mic.is-recording {
+  box-shadow: 0 0 34px rgba(34, 211, 238, 0.7);
+  transform: scale(1.06);
+}
+.mic__cap {
+  width: 11px;
+  height: 16px;
+  border-radius: 6px;
+  background: #04222b;
+}
+
+/* Velo del bottom-sheet (solo móvil) */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 5;
+}
+
+/* ── Estados por modo ────────────────────────────────────────────────────── */
+
+.app[data-mode="listening"] .dot { animation: pulse 1.1s ease-in-out infinite; }
+.app[data-mode="speaking"] .brand { color: var(--cyan-light); }
+
+/* ============================================================================
+ * Móvil — Concepto C (Voz). Marco vertical, orbe centrado, historial en
+ * bottom-sheet deslizable, micrófono protagonista.
+ * ==========================================================================*/
+@media (max-width: 760px) {
+  body {
+    background: radial-gradient(110% 70% at 50% 22%, #0b141b, #060a0e 60%, #04070a);
+  }
+
+  .app {
+    grid-template-columns: 1fr;
+  }
+  .app.history-collapsed { grid-template-columns: 1fr; }
+
+  .stage {
+    /* El padding inferior deja sitio al bottom-sheet asomado para que la píldora
+       de entrada no quede tapada por él (peek + barra de gestos de Android). */
+    padding: 20px 20px calc(96px + env(safe-area-inset-bottom));
+  }
+
+  .orbwrap { width: 248px; height: 248px; }
+  .ring--3 { display: none; }
+
+  .transcript__text { font-size: 21px; }
+
+  /* Botón de micro protagonista en móvil */
+  .mic { width: 56px; height: 56px; }
+  .mic__cap { width: 13px; height: 19px; }
+
+  /* Historial como bottom-sheet asomado */
+  .history {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    margin: 0;
+    max-height: 70vh;
+    border-radius: 18px 18px 0 0;
+    border: 1px solid var(--bd-cyan-soft);
+    border-bottom: none;
+    /* Altura que asoma el sheet plegado. Se le suma la safe-area para que la zona
+       pulsable quede POR ENCIMA de la barra de gestos de Android, no debajo. */
+    --peek: calc(76px + env(safe-area-inset-bottom));
+    transform: translateY(calc(100% - var(--peek)));
+    transition: transform 0.3s ease;
+    z-index: 6;
+    padding-top: 6px;
+    /* Cuando está abierto, que el contenido del fondo no quede bajo la barra. */
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+  .app.history-open .history { transform: translateY(0); }
+  .app.history-collapsed .history {
+    opacity: 1;
+    transform: translateY(calc(100% - var(--peek)));
+    pointer-events: auto;
+  }
+
+  /* Grabber: barra fina visible (::before) dentro de una franja pulsable ancha y
+     alta, para que sea fácil de tocar con el pulgar. */
+  .history__grabber {
+    display: block;
+    width: 100%;
+    height: 26px;
+    margin: 0 0 4px;
+    position: relative;
+    cursor: pointer;
+  }
+  .history__grabber::before {
+    content: "";
+    position: absolute;
+    top: 9px; left: 50%;
+    transform: translateX(-50%);
+    width: 44px; height: 5px;
+    border-radius: 3px;
+    background: var(--mono-dim);
+  }
+  /* La cabecera asomada también abre el sheet (zona de toque grande). */
+  .history__head { cursor: pointer; }
+  .history__toggle { display: none; }
+
+  /* El velo solo es relevante cuando el sheet está abierto */
+  .scrim { z-index: 5; }
+}
+
+/* ── Historial: acciones, badge de modelo y separador (Sub-hito 3.6.1) ────── */
+
+.history__actions { display: flex; align-items: center; gap: 4px; }
+
+.history__new {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.history__new:hover { color: var(--cyan); }
+
+/* Fila inferior del item: hora + badge de modelo */
+.history__item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+/* Badge de modelo (Haiku/Sonnet/Opus) — mismo lenguaje que .chip */
+.badge {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.badge:empty { display: none; }
+
+/* Separador de "nueva conversación" entre grupos del historial */
+.history__sep {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--mono-dim);
+  text-align: center;
+  margin: 10px 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history__sep::before, .history__sep::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--bd-neutral);
+}
+
+/* ── Modal de detalle de turno (pregunta + respuesta + modelo) ────────────── */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal[hidden] { display: none; }
+
+.modal__overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 7, 10, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.modal__dialog {
+  position: relative;
+  width: min(560px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--bd-cyan-soft);
+  overflow: hidden;
+}
+
+.modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 6px;
+}
+
+.modal__badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 5px;
+  padding: 2px 8px;
+}
+.modal__badge[hidden] { display: none; }
+
+/* Acciones de la cabecera del modal (repetir + cerrar), ancladas a la derecha
+   aunque el badge de modelo esté oculto. */
+.modal__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* Botón "Repetir": pill sobria en el lenguaje mono/cyan de .modal__badge. */
+.modal__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--bd-cyan);
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+.modal__action:hover { background: var(--fill-cyan); }
+.modal__action[hidden] { display: none; }
+.modal__action svg { width: 13px; height: 13px; }
+
+.modal__close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.modal__close:hover { color: var(--cyan); }
+
+.modal__body {
+  padding: 4px 18px 20px;
+  overflow-y: auto;
+}
+
+.modal__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted-2);
+  margin: 16px 0 6px;
+}
+.modal__body .modal__label:first-child { margin-top: 6px; }
+
+.modal__q {
+  font-size: 16px;
+  color: var(--text);
+  line-height: 1.45;
+}
+.modal__a {
+  font-size: 15px;
+  color: var(--text-2);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Widget de control multimedia (música YouTube) ───────────────────────── */
+
+/* Lado derecho de la topbar: chip "now playing" + reloj. */
+.topbar__right { display: flex; align-items: center; gap: 12px; }
+
+/* Mini-chip de verdad: pill compacto SOLO con el icono (mini-ecualizador), sin
+   título, para que no crezca con el nombre de la canción. El título va en el
+   panel. Solo visible cuando hay música; mismo lenguaje cyan que .chip. */
+.np-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 30px;
+  padding: 0;
+  color: var(--cyan);
+  background: var(--fill-cyan);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 15px;
+  cursor: pointer;
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.np-chip[hidden] { display: none; }
+.np-chip:hover {
+  background: rgba(34, 211, 238, 0.18);
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.3);
+}
+.np-chip__title { display: none; }
+
+/* Mini ecualizador animado del chip (se congela al pausar). */
+.np-chip__eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.np-chip__eq i {
+  width: 2px;
+  height: 100%;
+  background: var(--cyan);
+  border-radius: 1px;
+  transform-origin: bottom;
+  animation: eq 0.9s ease-in-out infinite;
+}
+.np-chip__eq i:nth-child(2) { animation-delay: 0.3s; }
+.np-chip__eq i:nth-child(3) { animation-delay: 0.6s; }
+.np-chip.is-paused .np-chip__eq i {
+  animation-play-state: paused;
+  transform: scaleY(0.3);
+}
+
+/* Panel desplegable de controles (popover anclado bajo el chip). */
+.np-panel {
+  position: absolute;
+  top: 56px;
+  right: 28px;
+  z-index: 15;
+  width: min(320px, calc(100vw - 40px));
+  padding: 14px 16px 16px;
+  background: var(--panel);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--bd-cyan);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--bd-cyan-soft);
+}
+.np-panel[hidden] { display: none; }
+
+.np-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.np-panel__src {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--muted-2);
+}
+.np-panel__close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.np-panel__close:hover { color: var(--cyan); }
+
+.np-panel__title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text);
+  margin: 8px 0 2px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.np-panel__next {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--mono-dim);
+  margin: 0 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.np-panel__next:empty { display: none; }
+
+/* Sliders (posición + volumen). */
+.np-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--bd-cyan);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.np-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: none;
+  background: var(--cyan);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.6);
+}
+.np-range::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: none;
+  background: var(--cyan);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.6);
+}
+
+.np-seek { margin-bottom: 6px; }
+.np-seek__time {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--mono-dim);
+  margin-top: 4px;
+}
+
+.np-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 12px 0 14px;
+}
+.np-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--bd-neutral);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease,
+    border-color 0.16s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.np-btn:hover {
+  color: var(--cyan);
+  border-color: var(--bd-cyan);
+  background: var(--fill-cyan);
+}
+.np-btn svg { width: 18px; height: 18px; }
+.np-btn--main {
+  width: 50px;
+  height: 50px;
+  background: var(--cyan);
+  color: #04222b;
+  border-color: transparent;
+}
+.np-btn--main:hover {
+  color: #04222b;
+  background: var(--cyan);
+  box-shadow: 0 0 24px rgba(34, 211, 238, 0.5);
+}
+.np-btn--main svg { width: 22px; height: 22px; }
+.np-stop__sq {
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.np-vol { display: flex; align-items: center; gap: 10px; }
+.np-vol__icon { color: var(--muted); display: inline-flex; }
+.np-vol__icon svg { width: 16px; height: 16px; }
+
+@media (max-width: 760px) {
+  .np-panel { top: 52px; right: 20px; left: 20px; width: auto; }
+}
+
+/* ── Keyframes ───────────────────────────────────────────────────────────── */
+
+@keyframes spin  { to { transform: rotate(360deg); } }
+@keyframes spinr { to { transform: rotate(-360deg); } }
+
+@keyframes wave {
+  0%, 100% { transform: scaleY(0.2); }
+  50%      { transform: scaleY(1); }
+}
+
+@keyframes drift {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 11px var(--cyan); }
+  50%      { opacity: 0.5; box-shadow: 0 0 4px var(--cyan); }
+}
+
+@keyframes eq {
+  0%, 100% { transform: scaleY(0.35); }
+  50%      { transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring, .waveform span, .typing span, .dot, .np-chip__eq i { animation: none !important; }
+}

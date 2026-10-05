@@ -1,0 +1,105 @@
+# === Stack jarvis ===
+# Despliegue: desde el directorio del stack en el servidor
+#   docker compose up -d --build
+#
+# network_mode: host es IMPRESCINDIBLE para el descubrimiento de Google Cast (mDNS
+# multicast). Con host-net, la directiva `ports:` se ignora: la API queda publicada
+# directamente en el host del NUC en JARVIS_PORT (8200).
+services:
+  jarvis:
+    build: .
+    container_name: jarvis
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Zona horaria local del proceso: el núcleo inyecta datetime.now() en cada
+      # prompt para que Jarvis sepa la hora. Sin esto el contenedor corre en UTC.
+      # Requiere tzdata en la imagen (instalado en el Dockerfile).
+      TZ: Europe/Madrid
+      # La API escucha en todas las interfaces del host, en el puerto del stack.
+      JARVIS_HOST: 0.0.0.0
+      JARVIS_PORT: 8200
+      # STT server-side (CPU i7-8809G = 4 núcleos / 8 hilos, sin GPU).
+      # Historial: `small` → `medium` (2026-06-25, mejor calidad ES, coste CPU
+      # asumible) → `large-v3-turbo` (2026-07-02, prueba) → `medium` (2026-07-02,
+      # revertido). Medición en vivo de turbo en esta CPU: STT fijo ~9.2s, RTF
+      # 2.5–3.4x, frente al baseline de medium (~1.7–1.9x) → turbo es ~3–4s más
+      # lento por turno. El encoder pesado de large-v3 gana al decoder podado sin
+      # GPU. medium es el mejor compromiso calidad/latencia en este NUC.
+      JARVIS_STT_MODEL: medium
+      # Caché de modelos de HuggingFace (faster-whisper descarga el modelo al
+      # primer uso). Apunta al volumen persistente para no re-descargar en cada
+      # rebuild de la imagen.
+      HF_HOME: /app/cache/huggingface
+      # BD SQLite del scheduler de recordatorios, en volumen persistente para que
+      # los avisos programados sobrevivan a reinicios/rebuilds del contenedor.
+      JARVIS_REMINDERS_DB: /app/data/reminders.sqlite
+      # Token cacheado de Spotify, en el volumen persistente (jarvis-data). El
+      # fichero se genera en local con scripts/spotify_auth.py y se copia aquí.
+      SPOTIFY_CACHE: /app/data/spotify-cache
+    volumes:
+      # Persiste el modelo Whisper descargado entre rebuilds (~1.5 GB para medium).
+      - jarvis-models:/app/cache
+      # Persiste datos de capacidades (BD de recordatorios; cache de Spotify futura).
+      - jarvis-data:/app/data
+    healthcheck:
+      # urllib en lugar de curl para no instalar binarios extra en la imagen.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8200/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      # Red de seguridad: un bug de reconexión en la capacidad Cast llenó el log
+      # a 9+ GB y con ello el disco del NUC entero (2026-07-03/04). Con esto, un
+      # futuro bucle de errores queda acotado a 50 MB en vez de tirar el host.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Satélite de voz ambiente (Hito 3.5+4): captura de la PS Eye + (Fase 3) wake
+  # word, hablando el protocolo /voice del núcleo. Sin healthcheck a propósito —
+  # deploy.sh solo espera la salud del contenedor `jarvis`, no de este.
+  jarvis-satellite:
+    build:
+      context: .
+      dockerfile: Dockerfile.satellite
+    container_name: jarvis-satellite
+    network_mode: host          # habla al núcleo por 127.0.0.1:8200 (host-net)
+    # Fase 3: servicio permanente (modo `run`, wake word) → se reinicia solo.
+    restart: unless-stopped
+    depends_on:
+      - jarvis
+    devices:
+      - /dev/snd:/dev/snd       # PS Eye vía passthrough del LXC (Fase 0)
+    environment:
+      # Fase 3: máquina de estados con wake word ("Hey Jarvis" → captura → Cast).
+      # Para revalidar el pipe sin wake usar JARVIS_SAT_MODE: test-once.
+      JARVIS_SAT_MODE: run
+      JARVIS_SAT_WS_URL: ws://127.0.0.1:8200/voice
+      JARVIS_SAT_CAST_DEVICE: Salón
+      JARVIS_SAT_INPUT_DEVICE: Camera    # substring del device de la PS Eye (PortAudio: "USB Camera-B4.09.24.1")
+      # Ganancia software SOLO para wake/VAD (los detectores). La PS Eye entrega
+      # RMS ~0.01 y sin amplificar el wake se queda en ~0.1. Se aplica en main.py
+      # aguas abajo; el audio que va al STT sigue CRUDO (amplificarlo lo clippea y
+      # Whisper transcribe basura). x12 sube el wake a ~0.30-0.40. Tunable.
+      JARVIS_SAT_INPUT_GAIN: "12"
+      # Umbrales del wake/VAD ajustados por voz (2026-07-02): la PS Eye capta flojo
+      # a distancia de salón (RMS ~0.01), así que se bajan respecto al default:
+      #   - wake 0.5 -> 0.3 (con ganancia x12 los "Hey Jarvis" claros dan ~0.30-0.34)
+      #   - VAD  0.5 -> 0.3 (a 0.5 no detectaba la voz lejana y la captura no
+      #     cerraba por silencio, aguantando el timeout de 8 s)
+      JARVIS_SAT_WAKE_THRESHOLD: "0.3"
+      JARVIS_SAT_VAD_THRESHOLD: "0.3"
+      # JARVIS_SAT_WAKE_THRESHOLD_SPEAKING: "0.7"  # barge-in, default en código
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  jarvis-models:
+  jarvis-data:

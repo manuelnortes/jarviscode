@@ -1,0 +1,21 @@
+# Dependencias del front-end de voz (Hito 3).
+#
+# Se mantienen SEPARADAS de requirements.txt a propósito: el núcleo en Docker
+# (NUC) no las necesita todavía. Cuando portemos la voz al contenedor (Hito 3.5)
+# las moveremos / añadiremos al build de la imagen.
+#
+# Instalación (con el venv activado):
+#   pip install -r requirements-voice.txt
+#
+# Piper NO se instala por pip aquí: usamos su binario por subproceso (ver
+# src/voice/tts.py y README). Esto evita los problemas de wheels de
+# piper-phonemize en Windows y da paridad Windows/NUC para el porte futuro.
+
+# STT — voz a texto (CTranslate2). Descarga el modelo de HuggingFace al usarlo.
+faster-whisper
+
+# Captura de micrófono y reproducción de audio (PortAudio).
+sounddevice
+
+# Buffers de audio.
+numpy

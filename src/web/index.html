@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- No-cache: cada recarga trae la última versión sin forzar refresco de caché. -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <meta name="theme-color" content="#04070a">
+  <title>JARVIS</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- data-mode: idle | listening | thinking | speaking → gobierna chips, indicadores y orbe -->
+  <div class="app" id="app" data-mode="idle">
+
+    <!-- ── Panel de historial (escritorio: izquierda colapsable · móvil: bottom-sheet) ── -->
+    <aside class="history" id="history" aria-label="Historial de conversación">
+      <div class="history__grabber" aria-hidden="true"></div>
+      <header class="history__head">
+        <span class="history__title">HISTORIAL</span>
+        <div class="history__actions">
+          <button class="history__new" id="history-new" aria-label="Nueva conversación" title="Nueva conversación">+</button>
+          <button class="history__toggle" id="history-toggle" aria-label="Plegar historial">‹</button>
+        </div>
+      </header>
+      <ul class="history__list" id="history-list">
+        <!-- Items inyectados por app.js. Placeholder estático de ejemplo: -->
+      </ul>
+    </aside>
+
+    <!-- ── Escenario principal ── -->
+    <main class="stage">
+      <header class="topbar">
+        <div class="topbar__id">
+          <span class="dot" id="status-dot" aria-hidden="true"></span>
+          <span class="brand">JARVIS</span>
+          <span class="chip" id="status-chip">EN REPOSO</span>
+        </div>
+        <div class="topbar__right">
+          <!-- Chip "now playing": oculto salvo cuando hay música sonando. Al
+               pulsarlo despliega el panel de control multimedia. -->
+          <button class="np-chip" id="np-chip" type="button" hidden
+                  aria-expanded="false" aria-controls="np-panel" title="Control de música">
+            <span class="np-chip__eq" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="np-chip__title" id="np-chip-title">—</span>
+          </button>
+          <div class="topbar__clock">
+            <span id="clock">--:--</span> · <span id="online">ONLINE</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Panel de control multimedia (música YouTube). Se despliega desde el
+           chip. Controla la MISMA sesión que la voz (estado en el backend). -->
+      <div class="np-panel" id="np-panel" hidden role="dialog" aria-label="Control de música">
+        <div class="np-panel__head">
+          <span class="np-panel__src" id="np-src">YOUTUBE</span>
+          <button class="np-panel__close" id="np-close" aria-label="Cerrar">×</button>
+        </div>
+        <p class="np-panel__title" id="np-title">—</p>
+        <p class="np-panel__next" id="np-next"></p>
+
+        <div class="np-seek">
+          <input class="np-range" id="np-seek-range" type="range" min="0" max="100"
+                 value="0" step="1" aria-label="Posición de la canción">
+          <div class="np-seek__time">
+            <span id="np-cur">0:00</span>
+            <span id="np-dur">0:00</span>
+          </div>
+        </div>
+
+        <div class="np-controls">
+          <button class="np-btn" id="np-prev" type="button" aria-label="Anterior">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M6 5h2v14H6zM20 5v14L9 12z"></path>
+            </svg>
+          </button>
+          <button class="np-btn np-btn--main" id="np-playpause" type="button" aria-label="Pausar">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="4" width="4" height="16" rx="1"></rect>
+              <rect x="14" y="4" width="4" height="16" rx="1"></rect>
+            </svg>
+          </button>
+          <button class="np-btn" id="np-next-btn" type="button" aria-label="Siguiente">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M16 5h2v14h-2zM4 5l11 7-11 7z"></path>
+            </svg>
+          </button>
+          <button class="np-btn" id="np-stop" type="button" aria-label="Parar">
+            <span class="np-stop__sq" aria-hidden="true"></span>
+          </button>
+        </div>
+
+        <div class="np-vol">
+          <span class="np-vol__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+            </svg>
+          </span>
+          <input class="np-range" id="np-vol-range" type="range" min="0" max="100"
+                 value="50" aria-label="Volumen">
+        </div>
+      </div>
+
+      <!-- Zona central: crece y hace scroll si la respuesta es larga, para que la
+           topbar y la barra de entrada queden siempre visibles. -->
+      <div class="stage__main">
+      <!-- Orbe central: anillos guía (CSS) + canvas (VoiceOrb) -->
+      <section class="orbwrap" aria-label="Orbe de voz">
+        <div class="rings">
+          <span class="ring ring--1"></span>
+          <span class="ring ring--2"></span>
+          <span class="ring ring--3"></span>
+        </div>
+        <canvas id="orb-canvas" class="orb-canvas"></canvas>
+      </section>
+
+      <!-- Forma de onda: su altura se vincula al mismo nivel de audio que el orbe -->
+      <div class="waveform" id="waveform" aria-hidden="true">
+        <span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span>
+      </div>
+
+      <!-- Transcripción + línea de estado -->
+      <section class="transcript" aria-live="polite">
+        <p class="transcript__text" id="transcript">Pulsa el micrófono y habla con Jarvis.</p>
+        <p class="transcript__status" id="status-line"></p>
+      </section>
+
+      <!-- Botón "Para de hablar": solo visible mientras Jarvis piensa o habla.
+           Corta la respuesta en curso (también se puede pulsar el micro = barge-in). -->
+      <button class="stopbtn" id="stop-btn" type="button" aria-label="Para de hablar" title="Para de hablar">
+        <span class="stopbtn__icon" aria-hidden="true"></span>
+        DETENER
+      </button>
+
+      <!-- Indicador "escribiendo" (modo thinking) -->
+      <div class="typing" id="typing" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+      </div><!-- /.stage__main -->
+
+      <!-- Barra de entrada (píldora): mini-orbe + texto + botón micro push-to-talk -->
+      <form class="inputbar" id="inputbar" autocomplete="off">
+        <canvas id="mini-orb-canvas" class="mini-orb" aria-hidden="true"></canvas>
+        <input
+          class="inputbar__field"
+          id="text-input"
+          type="text"
+          placeholder="Escribe o mantén pulsado el micrófono…"
+          aria-label="Mensaje de texto">
+        <button
+          class="mic"
+          id="mic-btn"
+          type="button"
+          aria-label="Mantén pulsado para hablar"
+          title="Mantén pulsado para hablar">
+          <span class="mic__cap"></span>
+        </button>
+      </form>
+    </main>
+
+    <!-- Velo para cerrar el bottom-sheet en móvil -->
+    <div class="scrim" id="scrim" hidden></div>
+
+    <!-- Modal de detalle de un turno (pregunta + respuesta + modelo) -->
+    <div class="modal" id="modal" hidden>
+      <div class="modal__overlay" id="modal-overlay"></div>
+      <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="modal-q-label">
+        <header class="modal__head">
+          <span class="modal__badge" id="modal-badge" hidden></span>
+          <div class="modal__actions">
+            <!-- Repetir en voz alta esta respuesta (re-sintetiza vía /voice). -->
+            <button class="modal__action" id="modal-repeat" type="button" title="Repetir en voz alta">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M1 4v6h6"></path>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+              </svg>
+              <span>REPETIR</span>
+            </button>
+            <button class="modal__close" id="modal-close" aria-label="Cerrar">×</button>
+          </div>
+        </header>
+        <div class="modal__body">
+          <p class="modal__label" id="modal-q-label">PREGUNTA</p>
+          <p class="modal__q" id="modal-q"></p>
+          <p class="modal__label">RESPUESTA</p>
+          <p class="modal__a" id="modal-a"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="voice-orb.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

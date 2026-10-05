@@ -1,0 +1,29 @@
+# Núcleo / orquestación
+claude-agent-sdk
+
+# Capacidad: control de medios (Google Cast)
+PyChromecast
+
+# Capacidad: notificaciones push (ntfy) — cliente HTTP async/sync
+httpx
+
+# Capacidad: recordatorios/temporizadores — scheduler con jobstore SQLite persistente
+APScheduler
+SQLAlchemy
+
+# Capacidad: control de reproducción de Spotify (Spotify Connect)
+spotipy
+
+# Capacidad: música por YouTube (extrae la URL de audio para castear). Conviene
+# mantenerlo actualizado: YouTube cambia y rompe extractores antiguos.
+# Necesita un runtime JS (deno) en la imagen — ver Dockerfile.
+yt-dlp
+
+# API del núcleo (HTTP/WebSocket) — front-ends desacoplados
+fastapi
+uvicorn[standard]
+# Cliente WebSocket (usado por el front-end de texto remoto y los tests)
+websockets
+
+# Configuración
+python-dotenv

@@ -1,0 +1,26 @@
+# Entornos y secretos (el .env se inyecta por env_file en runtime, no se hornea)
+.venv/
+venv/
+env/
+.env
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Git / docs / tests no necesarios en la imagen
+.git/
+.gitignore
+docs/
+scripts/
+PLAN.md
+README.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
