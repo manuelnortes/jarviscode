@@ -159,6 +159,28 @@ def get_models() -> tuple[WhisperSTT, PiperTTS]:
     return _stt, _tts
 
 
+# Serializa la primera carga de modelos entre conexiones concurrentes.
+_models_lock = asyncio.Lock()
+
+
+async def get_models_async() -> tuple[WhisperSTT, PiperTTS]:
+    """Versión no bloqueante de :func:`get_models` para usar desde el event loop.
+
+    Crear WhisperSTT es lento (en una instalación nueva incluye descargar ~1,5 GB
+    del modelo); hecho en el event loop congelaba TODO el servidor (chat de texto,
+    /health…) mientras duraba. Se carga en un hilo, y el lock evita que dos
+    conexiones simultáneas carguen Whisper dos veces (el doble de RAM: ver el
+    incidente del 2026-10-06 en el PLAN).
+
+    Returns:
+        Par ``(stt, tts)`` listo para usar.
+    """
+    if _stt is not None and _tts is not None:
+        return _stt, _tts
+    async with _models_lock:
+        return await asyncio.to_thread(get_models)
+
+
 def _pcm16_to_float32(raw: bytes) -> np.ndarray:
     """Convierte PCM crudo Int16 LE en float32 normalizado [-1, 1] para Whisper.
 
@@ -306,7 +328,7 @@ async def voice_endpoint(websocket: WebSocket) -> None:
         websocket: Conexión WebSocket entrante (ruta `/voice`).
     """
     await websocket.accept()
-    stt, tts = get_models()
+    stt, tts = await get_models_async()
 
     # Buffer de la utterance en curso (PCM Int16 LE del micro del cliente).
     utterance = bytearray()

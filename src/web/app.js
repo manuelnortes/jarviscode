@@ -685,9 +685,25 @@
     }
   }
 
+  // Con texto escrito, el botón del micro pasa a ser "enviar" (patrón WhatsApp):
+  // en móvil no hay otro botón de envío y se pulsaba el micro esperando enviar.
+  function updateMicMode() {
+    const hasText = textInput.value.trim() !== "";
+    micBtn.classList.toggle("is-send", hasText);
+    const label = hasText ? "Enviar mensaje" : "Mantén pulsado para hablar";
+    micBtn.setAttribute("aria-label", label);
+    micBtn.title = label;
+  }
+  textInput.addEventListener("input", updateMicMode);
+
   // Push-to-talk con pointer events (cubre ratón y táctil).
   micBtn.addEventListener("pointerdown", (e) => {
+    // preventDefault también evita que el input pierda el foco (teclado móvil abierto).
     e.preventDefault();
+    if (micBtn.classList.contains("is-send")) {
+      inputbar.requestSubmit();
+      return;
+    }
     micBtn.setPointerCapture(e.pointerId);
     startRecording();
   });
@@ -740,6 +756,7 @@
     const prompt = textInput.value.trim();
     if (!prompt) return;
     textInput.value = "";
+    updateMicMode();
     sendText(prompt);
   });
 

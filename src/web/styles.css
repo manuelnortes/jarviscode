@@ -423,6 +423,16 @@ body {
   border-radius: 6px;
   background: #04222b;
 }
+/* Modo "enviar" (hay texto escrito): la cápsula del micro se cambia por una
+   flecha hacia arriba de trazo redondeado (estilo apps de chat de IA). */
+.mic__send {
+  display: none;
+  width: 20px;
+  height: 20px;
+  color: #04222b;
+}
+.mic.is-send .mic__cap { display: none; }
+.mic.is-send .mic__send { display: block; }
 
 /* Velo del bottom-sheet (solo móvil) */
 .scrim {
@@ -465,6 +475,7 @@ body {
   /* Botón de micro protagonista en móvil */
   .mic { width: 56px; height: 56px; }
   .mic__cap { width: 13px; height: 19px; }
+  .mic__send { width: 26px; height: 26px; }
 
   /* Historial como bottom-sheet asomado */
   .history {
