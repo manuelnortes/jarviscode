@@ -29,7 +29,8 @@ services:
       # 2.5–3.4x, frente al baseline de medium (~1.7–1.9x) → turbo es ~3–4s más
       # lento por turno. El encoder pesado de large-v3 gana al decoder podado sin
       # GPU. medium es el mejor compromiso calidad/latencia en este NUC.
-      JARVIS_STT_MODEL: medium
+      # Configurable desde .env; si se cambia a uno mayor, revisar JARVIS_MEM_LIMIT.
+      JARVIS_STT_MODEL: ${JARVIS_STT_MODEL:-medium}
       # Caché de modelos de HuggingFace (faster-whisper descarga el modelo al
       # primer uso). Apunta al volumen persistente para no re-descargar en cada
       # rebuild de la imagen.
@@ -45,6 +46,14 @@ services:
       - jarvis-models:/app/cache
       # Persiste datos de capacidades (BD de recordatorios; cache de Spotify futura).
       - jarvis-data:/app/data
+    # Tope de RAM del contenedor. Sin él, cargar Whisper en un host justo de
+    # memoria no provoca un OOM limpio sino thrashing que congela la máquina entera
+    # (incidente 2026-10-06: dos Whisper medium a la vez colgaron el LXC). Con el
+    # tope, lo peor es que el kernel mate y reinicie este contenedor.
+    # memswap_limit = mem_limit → sin swap (evita el mismo thrashing vía swap).
+    # Pico medido con medium: ~1,9 GB. Modelos mayores (large-v3…) necesitan subirlo.
+    mem_limit: ${JARVIS_MEM_LIMIT:-3g}
+    memswap_limit: ${JARVIS_MEM_LIMIT:-3g}
     healthcheck:
       # urllib en lugar de curl para no instalar binarios extra en la imagen.
       # Lee JARVIS_PORT del entorno del contenedor (no hay shell que expanda $VAR).
