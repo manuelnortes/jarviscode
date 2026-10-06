@@ -525,6 +525,19 @@
       case "session_reset":
         applySessionReset(msg.reason);
         break;
+      case "voice_loading":
+        // El servidor aún carga Whisper: lo grabado se procesará al terminar.
+        if (!recording) setMode("thinking", "PREPARANDO VOZ…");
+        transcriptEl.textContent = "Cargando el modelo de voz, un momento…";
+        break;
+      case "voice_ready":
+        if (transcriptEl.textContent.startsWith("Cargando el modelo de voz")) {
+          transcriptEl.textContent = "";
+        }
+        if (!recording && app.dataset.mode === "thinking" && statusLine.textContent === "PREPARANDO VOZ…") {
+          setMode("idle");
+        }
+        break;
       case "error":
         setMode("idle", "ERROR");
         transcriptEl.textContent = `⚠ ${msg.detail || "Error del servidor"}`;

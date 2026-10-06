@@ -51,9 +51,11 @@ services:
     # (incidente 2026-10-06: dos Whisper medium a la vez colgaron el LXC). Con el
     # tope, lo peor es que el kernel mate y reinicie este contenedor.
     # memswap_limit = mem_limit → sin swap (evita el mismo thrashing vía swap).
-    # Pico medido con medium: ~1,9 GB. Modelos mayores (large-v3…) necesitan subirlo.
-    mem_limit: ${JARVIS_MEM_LIMIT:-3g}
-    memswap_limit: ${JARVIS_MEM_LIMIT:-3g}
+    # Medido con medium (2026-10-06): ~2,0 GB el proceso con Whisper+Piper cargados,
+    # +~0,35 GB por cada sesión abierta (CLI de Claude); con la web (texto + voz)
+    # roza 3 GB y con 3g llegó a reiniciarse → 4g. Modelos mayores: subirlo.
+    mem_limit: ${JARVIS_MEM_LIMIT:-4g}
+    memswap_limit: ${JARVIS_MEM_LIMIT:-4g}
     healthcheck:
       # urllib en lugar de curl para no instalar binarios extra en la imagen.
       # Lee JARVIS_PORT del entorno del contenedor (no hay shell que expanda $VAR).

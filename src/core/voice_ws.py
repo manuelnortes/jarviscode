@@ -178,7 +178,12 @@ async def get_models_async() -> tuple[WhisperSTT, PiperTTS]:
     if _stt is not None and _tts is not None:
         return _stt, _tts
     async with _models_lock:
-        return await asyncio.to_thread(get_models)
+        if _stt is not None and _tts is not None:  # los cargó quien tenía el lock
+            return _stt, _tts
+        t0 = time.monotonic()
+        models = await asyncio.to_thread(get_models)
+        tlog.info("modelos de voz cargados en %.1fs", time.monotonic() - t0)
+        return models
 
 
 def _pcm16_to_float32(raw: bytes) -> np.ndarray:
@@ -328,7 +333,15 @@ async def voice_endpoint(websocket: WebSocket) -> None:
         websocket: Conexión WebSocket entrante (ruta `/voice`).
     """
     await websocket.accept()
-    stt, tts = await get_models_async()
+    if _stt is None or _tts is None:
+        # Primera conexión tras arrancar (o precarga aún en curso): avisar al cliente
+        # para que no parezca colgado. Lo que mande mientras tanto queda en cola y se
+        # procesa al terminar la carga.
+        await websocket.send_json({"type": "voice_loading"})
+        stt, tts = await get_models_async()
+        await websocket.send_json({"type": "voice_ready"})
+    else:
+        stt, tts = _stt, _tts
 
     # Buffer de la utterance en curso (PCM Int16 LE del micro del cliente).
     utterance = bytearray()

@@ -59,8 +59,8 @@ El diseño y sus decisiones están en [docs/arquitectura.md](docs/arquitectura.m
 ## Requisitos
 
 - Python 3.11+ (la imagen Docker usa 3.13) y Node.js (el Agent SDK usa el CLI de Claude Code).
-- Unos **2 GB de RAM libre** para la voz con el modelo Whisper `medium` por defecto (pico medido
-  ~1,9 GB al cargarlo; `small` necesita bastante menos).
+- Unos **3 GB de RAM libre** con el modelo Whisper `medium` por defecto (medido: ~2 GB con los
+  modelos de voz cargados, más ~0,35 GB por sesión abierta; `small` necesita bastante menos).
 - Suscripción Claude Pro/Max y un token de larga duración generado con `claude setup-token`.
 - **No** definir `ANTHROPIC_API_KEY`: si existe, el SDK factura por token e ignora la suscripción.
 - Opcional, según capacidad: altavoces Google Cast en la LAN, un topic de ntfy, una app de Spotify
@@ -114,7 +114,8 @@ git); las rutas se configuran con `JARVIS_PIPER_BIN` y `JARVIS_TTS_VOICE`.
 |----------|---------|--------------|
 | `JARVIS_USER_NAME` | `Tony` | Cómo se dirige Jarvis a ti |
 | `JARVIS_STT_MODEL` | `small` | Modelo Whisper (`medium` en el compose) |
-| `JARVIS_MEM_LIMIT` | `3g` | Tope de RAM del contenedor Docker (sin swap); súbelo con modelos Whisper mayores |
+| `JARVIS_MEM_LIMIT` | `4g` | Tope de RAM del contenedor Docker (sin swap); súbelo con modelos Whisper mayores |
+| `JARVIS_STT_PRELOAD` | `1` | Carga los modelos de voz al arrancar; `0` ahorra ~2 GB si solo usas texto |
 | `JARVIS_STT_DEVICE` | `cpu` | `cpu` o `cuda` |
 | `JARVIS_TTS_VOICE` | voz es_ES local | Ruta a la voz `.onnx` de Piper |
 | `NTFY_BASE_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` | `https://ntfy.sh` / – / – | Notificaciones push |

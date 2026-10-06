@@ -25,7 +25,9 @@ recicla su `JarvisCore` para volver a Haiku sin recargar — por mensaje de cont
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,7 +40,7 @@ from src.capabilities.reminders import shutdown_scheduler, start_scheduler
 from src.core import tts_store
 from src.core.jarvis import JarvisConfig, JarvisCore
 from src.core.session import FAREWELL, is_closing
-from src.core.voice_ws import voice_endpoint
+from src.core.voice_ws import get_models_async, voice_endpoint
 
 # Directorio del frontend web (UI de voz, Hito 3.6). Se sirve estático.
 _WEB_DIR = Path(__file__).resolve().parents[1] / "web"
@@ -59,10 +61,29 @@ async def lifespan(app: FastAPI):
     sesión de chat abierta.
     """
     start_scheduler()
+    # Precarga de Whisper/Piper en segundo plano: así la primera sesión de voz no
+    # espera la carga (~7 s con el modelo en disco; minutos si hay que descargarlo).
+    # JARVIS_STT_PRELOAD=0 la desactiva (uso solo texto: no gasta ~2 GB de RAM).
+    preload = None
+    if os.environ.get("JARVIS_STT_PRELOAD", "1") != "0":
+        preload = asyncio.create_task(_preload_voice_models())
     try:
         yield
     finally:
+        if preload is not None:
+            preload.cancel()
         shutdown_scheduler()
+
+
+async def _preload_voice_models() -> None:
+    """Carga los modelos de voz sin bloquear el arranque; un fallo solo se registra.
+
+    Si falla, la carga se reintentará igualmente en la primera conexión de voz.
+    """
+    try:
+        await get_models_async()
+    except Exception:
+        logging.getLogger("jarvis").exception("Fallo precargando los modelos de voz.")
 
 
 app = FastAPI(title="Jarvis Core API", version="0.1.0", lifespan=lifespan)
