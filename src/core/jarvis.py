@@ -111,7 +111,7 @@ _CAPABILITY_PROMPTS = {
         "- Proyectos de desarrollo de {user} (herramientas mcp__workspace__*): estado de un proyecto (\"¿en qué me quedé con X?\" → project_status, resúmelo en dos o tres frases), tareas pendientes (todo_list), qué se ha hecho últimamente (recent_activity) y si hay algo sin subir (unpushed). No puedes commitear ni subir nada: de lo pendiente solo informas. Notas: cuando {user} diga \"apunta…\" o \"anota…\", usa note_add sin pedir confirmación y repite brevemente lo apuntado; si a continuación lo corrige, usa note_edit con el id que devolvió note_add (si no lo tienes, búscalo con todo_list); si pide quitarla, note_delete. Solo puedes escribir notas en ese Inbox; no ofrezcas editar planes ni código."
     ),
     "agents": (
-        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user} (por ahora solo leen e investigan: revisar código, proponer mejoras, buscar información). Úsalos cuando {user} pida encargar, delegar o \"que un agente mire…\". Redacta la tarea de forma completa (el agente no ve esta conversación). Tras agent_start di brevemente que el agente está en marcha y que le avisarás; no esperes al resultado. Para \"¿cómo van?\" usa agent_status; para contar lo que encontró, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno que está en idle, agent_message; para pararlo, agent_cancel. Refiérete a cada agente por su repositorio y su tarea, no por el id. Mientras los agentes solo puedan leer, no ofrezcas que implementen cambios."
+        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user} (por ahora solo leen e investigan: revisar código, proponer mejoras, buscar información). Úsalos cuando {user} pida encargar, delegar o \"que un agente mire…\". Redacta la tarea de forma completa (el agente no ve esta conversación). Tras agent_start di brevemente que el agente está en marcha y que le avisarás al móvil cuando termine; no esperes al resultado. Para \"¿cómo van?\" usa agent_status; para contar lo que encontró, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno que está en idle, agent_message; para pararlo, agent_cancel. Refiérete a cada agente por su repositorio y su tarea, no por el id. Mientras los agentes solo puedan leer, no ofrezcas que implementen cambios."
     ),
 }
 
@@ -174,6 +174,12 @@ def build_system_prompt(capabilities: list[str]) -> str:
     # Workspace sin remoto de notas es solo lectura: que no prometa apuntar nada.
     if not os.getenv("JARVIS_NOTES_REMOTE", "").strip():
         texts["workspace"] = texts["workspace"].split(" Notas:")[0]
+    # Sin notificaciones no hay aviso al móvil: que no lo prometa.
+    if "notify" not in capabilities:
+        texts["agents"] = texts["agents"].replace(
+            "y que le avisarás al móvil cuando termine",
+            "y que puede preguntarte cómo va cuando quiera",
+        )
     lines = "\n".join(texts[c] for c in capabilities)
     prompt = _DEFAULT_SYSTEM_PROMPT_TEMPLATE.replace("{capabilities}\n", lines + "\n" if lines else "")
     return prompt.replace("{user}", USER_NAME)

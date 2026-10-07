@@ -119,7 +119,8 @@ async def _run(coro) -> dict:
     "agent_start",
     "Encarga una tarea a un agente de Claude que trabaja en segundo plano sobre un repositorio "
     "(por ahora solo lee e investiga: revisar código, proponer mejoras, buscar información). "
-    "Devuelve su id. El usuario recibirá un aviso al móvil cuando termine.",
+    "Devuelve su id. Si las notificaciones están activas, el usuario recibirá un aviso al móvil "
+    "cuando termine.",
     {
         "type": "object",
         "properties": {
