@@ -7,9 +7,11 @@ token compartido ``JARVIS_WORKER_TOKEN`` en la cabecera ``X-Jarvis-Token``: en
 Endpoints:
     GET  /health
     GET  /agents                    lista (?active=1 solo los vivos)
-    POST /agents                    {"repo": str, "task": str}
+    GET  /usage                     último estado del límite de uso de la suscripción
+    POST /agents                    {"repo": str, "task": str, "mode": "read"|"code"}
     GET  /agents/{id}
     POST /agents/{id}/message       {"text": str}
+    POST /agents/{id}/escalate      la pregunta pendiente pasa al usuario
     POST /agents/{id}/cancel
 """
 
@@ -58,6 +60,7 @@ class NewAgent(BaseModel):
 
     repo: str
     task: str
+    mode: str = "read"
 
 
 class Message(BaseModel):
@@ -82,7 +85,7 @@ async def list_agents(active: int = 0) -> list[dict]:
 async def create_agent(body: NewAgent) -> dict:
     """Encola un agente nuevo."""
     try:
-        return manager.create(body.repo, body.task)
+        return manager.create(body.repo, body.task, body.mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -103,6 +106,21 @@ async def message_agent(agent_id: str, body: Message) -> dict:
         return await manager.message(agent_id, body.text)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/agents/{agent_id}/escalate", dependencies=[Depends(_auth)])
+async def escalate_agent(agent_id: str) -> dict:
+    """El gestor pasa al usuario la pregunta pendiente de un agente."""
+    try:
+        return manager.escalate(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/usage", dependencies=[Depends(_auth)])
+async def usage() -> dict:
+    """Último estado conocido del límite de uso (utilización, reinicio)."""
+    return manager.usage()
 
 
 @app.post("/agents/{agent_id}/cancel", dependencies=[Depends(_auth)])

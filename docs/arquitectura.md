@@ -124,7 +124,7 @@ pronuncia bien y RVC aplica el timbre encima, en la GPU. Sin GPU, se degrada a P
 | Recordatorios | APScheduler + SQLite, arrancado en el lifespan de FastAPI; persisten a reinicios y se entregan por ntfy |
 | Domótica | Servidor MCP de Home Assistant (SSE + token de larga duración) por la LAN; HA solo expone las luces |
 | Workspace | Herramientas propias (una llamada por pregunta hablada) sobre la carpeta de proyectos en solo lectura y los bare repos; las notas van a un Inbox de un `TODO.md` versionado, con commit y push por cambio |
-| Agentes | Cliente HTTP del contenedor `jarvis-worker` (aparte, sin root, con token), que ejecuta una cola de sesiones del Claude Agent SDK sobre un clon por agente; el núcleo lo sondea y avisa de los cambios de estado por ntfy. Solo lectura en esta versión |
+| Agentes | Cliente HTTP del contenedor `jarvis-worker` (aparte, sin root, con token), que ejecuta una cola de sesiones del Claude Agent SDK sobre un clon por agente; el núcleo lo sondea y avisa de los cambios de estado por ntfy (o en tu siguiente turno). Modo lectura o código: los de código trabajan en ramas `agent/*` (un hook `pre-receive` por UID bloquea lo demás) y dejan PR ligeros; ciclo del idle con handoff dentro de la hora de caché de prompt |
 
 Las capacidades se activan con `JARVIS_CAPABILITIES` y se apagan solas si les falta configuración; el system prompt solo describe las activas.
 

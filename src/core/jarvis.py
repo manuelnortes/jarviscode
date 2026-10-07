@@ -111,7 +111,7 @@ _CAPABILITY_PROMPTS = {
         "- Proyectos de desarrollo de {user} (herramientas mcp__workspace__*): estado de un proyecto (\"¿en qué me quedé con X?\" → project_status, resúmelo en dos o tres frases), tareas pendientes (todo_list), qué se ha hecho últimamente (recent_activity) y si hay algo sin subir (unpushed). No puedes commitear ni subir nada: de lo pendiente solo informas. Notas: cuando {user} diga \"apunta…\" o \"anota…\", usa note_add sin pedir confirmación y repite brevemente lo apuntado; si a continuación lo corrige, usa note_edit con el id que devolvió note_add (si no lo tienes, búscalo con todo_list); si pide quitarla, note_delete. Solo puedes escribir notas en ese Inbox; no ofrezcas editar planes ni código."
     ),
     "agents": (
-        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user} (por ahora solo leen e investigan: revisar código, proponer mejoras, buscar información). Úsalos cuando {user} pida encargar, delegar o \"que un agente mire…\". Redacta la tarea de forma completa (el agente no ve esta conversación). Tras agent_start di brevemente que el agente está en marcha y que le avisarás al móvil cuando termine; no esperes al resultado. Para \"¿cómo van?\" usa agent_status; para contar lo que encontró, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno que está en idle, agent_message; para pararlo, agent_cancel. Refiérete a cada agente por su repositorio y su tarea, no por el id. Mientras los agentes solo puedan leer, no ofrezcas que implementen cambios."
+        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user}. Dos modos: mode='read' para revisar, investigar o proponer, y mode='code' cuando {user} pide cambiar, arreglar o implementar algo: el agente trabaja en una rama propia, pasa los tests y deja un PR que {user} revisa; nunca se fusiona nada solo. Redacta la tarea de forma completa (el agente no ve esta conversación). Tras agent_start di brevemente que el agente está en marcha y que le avisarás al móvil cuando termine; no esperes al resultado. Para \"¿cómo van?\" usa agent_status; para contar lo que hizo o su PR, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno en idle o done, agent_message; para pararlo, agent_cancel. Si un agente pregunta y espera al gestor (eres tú): respóndele con agent_message si lo puedes deducir de lo que sabes; si es una decisión de {user} (diseño, gustos, prioridades), pregúntaselo o usa agent_escalate. Si recibes una etiqueta [avisos de agentes …], cuéntaselo a {user} brevemente al principio de tu respuesta. Refiérete a cada agente por su repositorio y su tarea, no por el id."
     ),
 }
 
@@ -265,6 +265,8 @@ class JarvisCore:
         self._history: list[tuple[str, str]] = []
         # Capacidades cargadas (las fija __aenter__); legible por los front-ends.
         self.capabilities: list[str] = []
+        # Avisos de agentes ya mostrados en esta conversación (sin ntfy, D10).
+        self._agent_notices_seen: set[str] = set()
 
     async def __aenter__(self) -> "JarvisCore":
         # Prepara herramientas y MCP pero NO conecta: la conexión es perezosa.
@@ -484,6 +486,14 @@ class JarvisCore:
         # modo que los front-ends nunca ven la hora inyectada y no se duplica con
         # el badge de hora que la UI web ya pinta en el navegador.
         augmented_prompt = f"{clean_prompt}\n\n[ahora {datetime.now():%d/%m/%Y %H:%M}]"
+        # Sin ntfy, los avisos de los agentes llegan "a través del gestor" (D10):
+        # una etiqueta más con lo nuevo desde el último turno.
+        if "agents" in self.capabilities and "notify" not in self.capabilities:
+            from src.capabilities.agents import pending_notices
+
+            notices = await pending_notices(self._agent_notices_seen)
+            if notices:
+                augmented_prompt += "\n[avisos de agentes: " + " | ".join(notices) + "]"
         await self._client.query(augmented_prompt)
         async for message in self._client.receive_response():
             if isinstance(message, AssistantMessage):

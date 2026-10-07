@@ -39,10 +39,25 @@ CREATE TABLE IF NOT EXISTS agents (
 )
 """
 
+# Columnas añadidas en la Fase 2 (migración aditiva: ALTER TABLE si faltan).
+_PHASE2_COLUMNS = {
+    "base_branch": "TEXT",
+    "pr_status": "TEXT",           # None (sin PR) · open · merged · closed
+    "pr_title": "TEXT",
+    "pr_body": "TEXT",
+    "pr_tests_passed": "INTEGER",  # 1/0/None (sin tests o sin informar)
+    "pr_tests_output": "TEXT",
+    "pr_diffstat": "TEXT",
+    "handoff": "TEXT",             # ritual de cierre (estado para retomar en frío)
+    "idle_warned": "INTEGER DEFAULT 0",
+    "handoff_done": "INTEGER DEFAULT 0",
+    "resume_at": "REAL",           # rate_limited: cuándo reanudar
+}
+
 # Columnas que se pueden actualizar con ``update`` (evita SQL con nombres arbitrarios).
 _UPDATABLE = {
     "state", "substate", "waiting_on", "question", "result", "error", "branch",
-    "cost_usd", "turns", "idle_since", "task",
+    "cost_usd", "turns", "idle_since", "task", *_PHASE2_COLUMNS,
 }
 
 
@@ -60,6 +75,10 @@ class AgentStore:
         self._lock = threading.Lock()
         with self._conn() as db:
             db.execute(_SCHEMA)
+            have = {r["name"] for r in db.execute("PRAGMA table_info(agents)")}
+            for col, decl in _PHASE2_COLUMNS.items():
+                if col not in have:
+                    db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
 
     def _conn(self) -> sqlite3.Connection:
         """Conexión nueva con filas como dict."""

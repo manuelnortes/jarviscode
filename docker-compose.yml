@@ -134,7 +134,16 @@ services:
       JARVIS_AGENT_REPOS: ${JARVIS_AGENT_REPOS:-}
       JARVIS_AGENTS_MAX: ${JARVIS_AGENTS_MAX:-2}
       JARVIS_AGENT_MODEL: ${JARVIS_AGENT_MODEL:-claude-sonnet-4-6}
-      JARVIS_AGENT_IDLE_TTL: ${JARVIS_AGENT_IDLE_TTL:-3600}
+      # Ciclo del idle (s): aviso, ritual de cierre (handoff) y cierre de la sesión.
+      JARVIS_AGENT_IDLE_WARN: ${JARVIS_AGENT_IDLE_WARN:-2100}
+      JARVIS_AGENT_HANDOFF_AT: ${JARVIS_AGENT_HANDOFF_AT:-2700}
+      JARVIS_AGENT_IDLE_TTL: ${JARVIS_AGENT_IDLE_TTL:-3300}
+      # Tope de trabajo por turno y espera al gestor antes de preguntar al usuario.
+      JARVIS_AGENT_TURN_TIMEOUT: ${JARVIS_AGENT_TURN_TIMEOUT:-1800}
+      JARVIS_AGENT_MANAGER_TIMEOUT: ${JARVIS_AGENT_MANAGER_TIMEOUT:-300}
+      # Salvaguarda: con el uso de la ventana de la suscripción en este % o más,
+      # no se lanzan agentes ni empiezan turnos (el margen queda para el usuario).
+      JARVIS_AGENT_USAGE_LIMIT: ${JARVIS_AGENT_USAGE_LIMIT:-85}
       TZ: ${TZ:-Europe/Madrid}
     # Solo localhost: el núcleo (host-net) llega por 127.0.0.1.
     ports:

@@ -15,6 +15,9 @@ services:
 
   # Worker de agentes (perfil "agents"): SOLO los bare repos que los agentes
   # pueden usar (los mismos que JARVIS_AGENT_REPOS), en /repos/<repo>.git.
+  # Con escritura (sin :ro) para que empujen sus ramas agent/*: prepara antes
+  # cada bare con scripts/agent_repo_setup.sh (permisos + hook que les impide
+  # tocar cualquier otra rama). Para agentes solo de lectura basta con :ro.
   jarvis-worker:
     volumes:
       - /ruta/a/bare-repos/mi-repo.git:/repos/mi-repo.git

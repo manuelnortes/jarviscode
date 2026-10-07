@@ -118,7 +118,7 @@ The system prompt only describes the active capabilities. Web search is always o
 | `notify` | Push notifications to your phone | An ntfy topic: `NTFY_TOPIC` (+ `NTFY_BASE_URL`, `NTFY_TOKEN`) | `NTFY_TOPIC` empty |
 | `reminders` | Reminders and timers that survive restarts | `notify` (they are delivered through it) | `NTFY_TOPIC` empty |
 | `homeassistant` | Lights by room or name | Home Assistant with the MCP Server integration; `HA_URL`, `HA_TOKEN` | URL or token empty |
-| `agents` | Background Claude agents on your repos: "have an agent review X", "how are they doing?", "what did it find?" (read-only in this version) | The `jarvis-worker` container; see below | `JARVIS_AGENTS_URL` empty |
+| `agents` | Background Claude agents on your repos: "have an agent review X", "how are they doing?", "what did it find?", "fix X in Y" | The `jarvis-worker` container; see below | `JARVIS_AGENTS_URL` empty |
 | `workspace` | Your dev projects by voice: "where did I leave X?", pending tasks, recent commits, anything not pushed; dictated notes in an *Inbox* | Your projects folder mounted read-only; see below | `JARVIS_WORKSPACE` empty |
 
 ### Workspace setup
@@ -144,26 +144,49 @@ the core's `.env`, your projects folder or other tokens: only the Claude token, 
 the bare repos you allow. It listens on `127.0.0.1` only and requires a shared token. Each agent is a
 Claude Code session (Sonnet by default) working on its own clone of the repo.
 
-In this version agents are **read-only**: they read the code and search the web, then report back.
-Writing code on branches with lightweight pull requests is the next step (see Roadmap).
+Two modes:
+
+- **read**: the agent reads the code and searches the web, then reports back.
+- **code**: the agent works on its own branch `agent/<id>-<slug>`, runs the tests, commits, and the
+  runner pushes **only that branch** and opens a **lightweight pull request** (title, description,
+  diffstat, test result) that you review. Nothing is ever merged automatically.
+
+Agents can **ask** while working: clarifications go to Jarvis (the manager), who answers or passes
+them on to you; design decisions go straight to you; if the manager does not answer in 5 minutes,
+the question goes to you. A waiting agent frees its slot for the others.
+
+A finished agent stays **idle** with its session (and the warm one-hour prompt cache) for
+follow-ups. After 35 minutes you get a heads-up; at 45 it writes a **handoff** (in code mode, a
+file named after its branch, `agent/<id>-<slug>.md`, committed to the branch) and at 55 the session
+closes. Messaging it later resumes from the handoff in a fresh session. If the subscription's usage
+limit is hit, the agent pauses and resumes by itself when the window resets.
 
 1. In `.env`: `JARVIS_AGENTS_URL=http://127.0.0.1:8113`, a random `JARVIS_WORKER_TOKEN` and
    `JARVIS_AGENT_REPOS=<repo>[,<repo>…]`.
 2. In `docker-compose.override.yml`, mount each allowed bare repo at `/repos/<repo>.git` for the
    `jarvis-worker` service (see `docker-compose.override.example.yml`).
+   For **code** mode, mount it read-write and first run `scripts/agent_repo_setup.sh <repo>.git` as
+   root on the git server: it grants the worker's user write access only where git needs it and
+   installs a `pre-receive` hook that rejects any push from that user outside `agent/*` branches.
 3. `docker compose --profile agents up -d --build jarvis-worker`, then rebuild the core.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `JARVIS_AGENTS_MAX` | `2` | Agents **working** at the same time; more wait in a queue |
 | `JARVIS_AGENT_MODEL` | `claude-sonnet-4-6` | Model of the agents |
-| `JARVIS_AGENT_IDLE_TTL` | `3600` | Seconds a finished agent keeps its session (and the warm prompt cache) for follow-ups |
+| `JARVIS_AGENT_IDLE_WARN` / `_HANDOFF_AT` / `_IDLE_TTL` | `2100` / `2700` / `3300` | Idle lifecycle (s): heads-up, handoff, session closed |
+| `JARVIS_AGENT_MANAGER_TIMEOUT` | `300` | Seconds a clarification waits for the manager before going to you |
+| `JARVIS_AGENT_TURN_TIMEOUT` | `1800` | Max working seconds per turn (waiting for an answer does not count) |
+| `JARVIS_AGENT_USAGE_LIMIT` | `85` | Safeguard (%): at or above this usage of the subscription window (your own Claude usage included), no agents start and no new turns begin; paused ones resume when the window resets |
 | `JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS` | `3600` | Voice session timeout while it is managing live agents (instead of 90 s) |
 | `JARVIS_WORKER_MEM_LIMIT` | `4g` | RAM cap of the worker (~0.35 GB per live agent session) |
 
-Agent states (`GET /agents`): `queued`, `working`, `idle` (finished, session kept for follow-ups),
-`done`, `failed`, `cancelled`. You get a push notification (ntfy) when an agent finishes or fails.
-Ask "how are the agents doing?", "what did it find?", "tell it to also…" or "cancel it".
+Agent states (`GET /agents`): `queued`, `working`, `waiting_input` (asked something), `idle`
+(finished, session kept for follow-ups), `rate_limited`, `done` (session closed, resumable),
+`failed`, `cancelled`. With ntfy you get a push when an agent finishes (with its PR), fails, pauses,
+needs your answer or has been idle for a while; without ntfy, Jarvis tells you on your next turn.
+Ask "how are the agents doing?", "what did it find?", "tell it to also…", "cancel it".
+`GET /usage` on the worker shows the last known usage of the subscription window.
 
 ## Local development
 
@@ -221,7 +244,7 @@ scripts/           # Smoke test, diagnostics and end-to-end test scripts
 - GPU offload of STT/TTS to a desktop RTX card woken on demand (Wake-on-LAN), with the always-on
   server as fallback.
 - Character voices with RVC on top of Piper.
-- Agents that write code: branches, tests and lightweight pull requests (GitHub/Bitbucket later).
+- Merging agents' pull requests by voice, a web view of the PRs, and GitHub/Bitbucket pull requests.
 - More rooms (satellites), a Telegram front-end, calendar and e-mail.
 
 ## License
