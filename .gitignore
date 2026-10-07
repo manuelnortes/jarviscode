@@ -30,3 +30,6 @@ voices/
 
 # Datos de capacidades en dev (BD de recordatorios, cache de Spotify futura).
 data/
+
+# Override local del compose (rutas de la máquina; plantilla versionada aparte).
+docker-compose.override.yml

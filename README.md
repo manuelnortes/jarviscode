@@ -42,6 +42,9 @@ just interchangeable front-ends talking to it.
   - **Push notifications** via [ntfy](https://ntfy.sh).
   - **Reminders and timers** that survive restarts (APScheduler + SQLite), delivered via ntfy.
   - **Smart home** through Home Assistant's MCP server (lights by room or name).
+  - **Workspace**: the state of your dev projects by voice, plus dictated notes committed to git.
+
+Each capability can be switched on or off: see [Capabilities](#capabilities).
 
 See [docs/architecture.md](docs/architecture.md) for the design and the decisions behind it.
 
@@ -53,7 +56,8 @@ See [docs/architecture.md](docs/architecture.md) for the design and the decision
  Text clients ─────WS /ws──────┴──────► │ STT (faster-whisper) → JarvisCore → TTS (Piper)│
                                         │        │ Claude Agent SDK (Haiku/Sonnet/Opus)  │
                                         │        └─ MCP tools: web · Cast · YouTube ·    │
-                                        │           Spotify · ntfy · reminders · HA     │
+                                        │           Spotify · ntfy · reminders · HA ·   │
+                                        │           workspace                           │
                                         └───────────────────────────────────────────────┘
                                                  │ replies: audio stream or Google Cast
 ```
@@ -92,6 +96,44 @@ docker compose up -d --build
 > The web UI has no authentication of its own: put it behind a reverse proxy with SSO
 > (e.g. Authelia) or keep it on the LAN.
 
+## Capabilities
+
+Every capability is optional. A capability is loaded only if it passes **three filters**:
+
+1. It is listed in `JARVIS_CAPABILITIES` (comma-separated). Empty or `all` = all of them.
+   Example, music and notes only: `JARVIS_CAPABILITIES=media,youtube,workspace`.
+2. Its `enable_*` flag in `JarvisConfig` is on (default; for scripts and tests).
+3. Its configuration is present. Capabilities that depend on an external service **switch
+   themselves off** when their variables are missing, so Jarvis never offers a tool that would fail.
+
+The system prompt only describes the active capabilities. Web search is always on.
+
+| Name | What it does | Needs | Off by itself when |
+|---|---|---|---|
+| `media` | Google Cast: play a URL, pause, volume, seek, what's playing | Cast speakers on the LAN (`network_mode: host`) | – |
+| `youtube` | Hands-free music: "play X in the living room" → YouTube Mix radio on a Cast speaker | `media` | `media` is off |
+| `spotify` | Spotify Connect control (only when a device is already active) | Spotify developer app + Premium; `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, token from `python -m scripts.spotify_auth` | client ID/secret empty |
+| `notify` | Push notifications to your phone | An ntfy topic: `NTFY_TOPIC` (+ `NTFY_BASE_URL`, `NTFY_TOKEN`) | `NTFY_TOPIC` empty |
+| `reminders` | Reminders and timers that survive restarts | `notify` (they are delivered through it) | `NTFY_TOPIC` empty |
+| `homeassistant` | Lights by room or name | Home Assistant with the MCP Server integration; `HA_URL`, `HA_TOKEN` | URL or token empty |
+| `workspace` | Your dev projects by voice: "where did I leave X?", pending tasks, recent commits, anything not pushed; dictated notes in an *Inbox* | Your projects folder mounted read-only; see below | `JARVIS_WORKSPACE` empty |
+
+### Workspace setup
+
+Copy `docker-compose.override.example.yml` to `docker-compose.override.yml` (git-ignored; Docker
+Compose merges it automatically) and set the paths of your machine. Then, in `.env`:
+
+| Variable | Example | Purpose |
+|---|---|---|
+| `JARVIS_WORKSPACE` | `/workspace` | Projects folder (read-only). Each project is a folder with a `PLAN.md` or `README.md`; "where did I leave X?" reads the *resume point* / *status* section of its `PLAN.md` |
+| `JARVIS_GIT_ROOT` | `/opt/git` | Optional. Folder with bare repos (`<project>.git`) for "what was done this week?" across all your machines |
+| `JARVIS_NOTES_REMOTE` | `/opt/git/notes.git` | Optional. Git repo for notes. Without it the capability is read-only |
+| `JARVIS_NOTES_FILE` | `TODO.md` | File inside that repo. Jarvis adds an **Inbox** section and only ever touches its own lines there |
+
+Notes are committed and **pushed automatically** as `Jarvis <jarvis@localhost>`, one commit per
+change (add, fix, delete), never rewriting history. Jarvis repeats what it wrote; say "no, it was…"
+to correct it.
+
 ## Local development
 
 ```bash
@@ -120,8 +162,7 @@ are configurable with `JARVIS_PIPER_BIN` and `JARVIS_TTS_VOICE`.
 | `JARVIS_STT_PRELOAD` | `1` | Load the voice models at startup; `0` saves ~2 GB if you only use text |
 | `JARVIS_STT_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `JARVIS_TTS_VOICE` | local es_ES voice | Path to the Piper `.onnx` voice |
-| `NTFY_BASE_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` | `https://ntfy.sh` / – / – | Push notifications |
-| `HA_URL` / `HA_TOKEN` | – | Home Assistant MCP endpoint; capability disabled if empty |
+| `JARVIS_CAPABILITIES` | all | Capabilities to load, comma-separated; each one's own variables are in [Capabilities](#capabilities) |
 
 See [`.env.example`](.env.example) for the full list.
 
@@ -135,7 +176,7 @@ and the length threshold, all commented and editable without touching the core.
 ```
 src/
 ├── core/          # Headless core: JarvisCore, model routing, FastAPI server, voice WS, TTS clip store
-├── capabilities/  # MCP tools: Cast, YouTube, Spotify, ntfy, reminders
+├── capabilities/  # MCP tools: Cast, YouTube, Spotify, ntfy, reminders, workspace
 ├── voice/         # Audio capture, STT (faster-whisper), TTS (Piper)
 ├── frontends/     # Text REPL, WS client, desktop push-to-talk
 ├── satellite/     # Ambient satellite: mic, wake word, VAD, state machine

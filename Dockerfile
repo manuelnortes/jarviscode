@@ -9,9 +9,10 @@
 FROM python:3.13-slim
 
 # Node.js 20 (desde NodeSource) para el CLI de Claude Code, y curl para añadir el repo.
+# git: lo usa la capacidad de workspace (estado de repos y notas con commit/push).
 # Limpiamos las listas de apt al final para no inflar la imagen.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gnupg tzdata \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg tzdata git \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code \

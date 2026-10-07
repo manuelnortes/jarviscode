@@ -123,6 +123,9 @@ pronuncia bien y RVC aplica el timbre encima, en la GPU. Sin GPU, se degrada a P
 | Notificaciones | ntfy, publicando en formato JSON (UTF-8 seguro), con token Bearer opcional |
 | Recordatorios | APScheduler + SQLite, arrancado en el lifespan de FastAPI; persisten a reinicios y se entregan por ntfy |
 | Domótica | Servidor MCP de Home Assistant (SSE + token de larga duración) por la LAN; HA solo expone las luces |
+| Workspace | Herramientas propias (una llamada por pregunta hablada) sobre la carpeta de proyectos en solo lectura y los bare repos; las notas van a un Inbox de un `TODO.md` versionado, con commit y push por cambio |
+
+Las capacidades se activan con `JARVIS_CAPABILITIES` y se apagan solas si les falta configuración; el system prompt solo describe las activas.
 
 La fecha y hora actuales se inyectan en cada turno para que el modelo calcule recordatorios.
 

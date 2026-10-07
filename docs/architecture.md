@@ -125,6 +125,9 @@ falls back to neutral Piper.
 | Notifications | ntfy, publishing JSON (UTF-8 safe), with optional Bearer token |
 | Reminders | APScheduler + SQLite started in the FastAPI lifespan; they survive restarts and are delivered via ntfy |
 | Smart home | Home Assistant's MCP server (SSE + long-lived token) over the LAN; HA only exposes the lights |
+| Workspace | Purpose-built tools (one call per spoken question) over a read-only projects folder and bare repos; notes go to an Inbox in a git-tracked `TODO.md`, committed and pushed per change |
+
+Capabilities are toggled with `JARVIS_CAPABILITIES` and switch themselves off when their configuration is missing; the system prompt only describes the active ones.
 
 The current date and time are injected on every turn so the model can compute reminders.
 

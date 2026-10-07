@@ -1,0 +1,14 @@
+# === Plantilla: capacidad de workspace (estado de proyectos y notas por voz) ===
+# Copiar como docker-compose.override.yml (no versionado: lleva rutas de la
+# máquina). `docker compose` lo fusiona solo con docker-compose.yml.
+# Además, definir JARVIS_WORKSPACE / JARVIS_GIT_ROOT / JARVIS_NOTES_REMOTE en el
+# .env (ver .env.example).
+services:
+  jarvis:
+    volumes:
+      # Proyectos, solo lectura: PLAN.md, TODO y estado git de los working copies.
+      - /ruta/a/tus/proyectos:/workspace:ro
+      # Bare repos, solo lectura: actividad reciente de todos los equipos.
+      - /ruta/a/bare-repos:/opt/git:ro
+      # Único escribible: el remoto de las notas (push del Inbox).
+      - /ruta/a/bare-repos/notes.git:/opt/git/notes.git

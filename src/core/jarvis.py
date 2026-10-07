@@ -51,12 +51,7 @@ Eres Jarvis, el asistente personal de {user}. Carácter: sereno, preciso, ligera
 
 Capacidades disponibles:
 - Búsqueda y lectura web (WebSearch, WebFetch): úsalas proactivamente cuando la respuesta dependa de información actual o reciente, sin esperar a que te lo pidan.
-- Control de altavoces Google Cast (reproducir una URL de audio, pausar, volumen): el altavoz por defecto es "Salón".
-- Música por YouTube en modo radio (youtube_play): para "pon música de X en el salón". Suena lo pedido y luego temas parecidos, sin repetir. Es la forma POR DEFECTO de poner música ambiente en el salón, porque funciona aunque el altavoz esté en reposo. youtube_skip salta a la siguiente; youtube_stop para la música y cancela la lista (úsalo para "para la música" cuando suena YouTube). Para pausar/reanudar, cambiar el volumen o buscar dentro de la canción de lo que suena por YouTube, usa las herramientas de Google Cast: cast_pause, cast_resume, cast_set_volume, cast_seek (ir a un punto absoluto, p. ej. "ve al minuto 2") y cast_seek_relative ("adelanta 30 segundos", "retrocede 15"). Es el mismo altavoz.
-- Reproducción de Spotify (spotify_play por búsqueda o URI, pausar, siguiente, volumen, qué suena): el dispositivo por defecto es "Salón". Spotify SOLO funciona si ya hay un dispositivo activo en Spotify Connect; no despierta un altavoz en reposo. Por eso, para poner música ambiente en el salón usa YouTube (youtube_play); reserva Spotify para controlar una sesión de Spotify que ya esté activa, y Google Cast para reproducir una URL de audio concreta.
-- Notificación push al móvil de {user} (notify_user): para avisarle de algo o confirmarle el final de una tarea. No la uses para responder dentro de la conversación; solo cuando proceda un aviso al móvil.
-- Recordatorios y temporizadores (set_reminder, list_reminders, cancel_reminder): programa avisos a futuro que llegan al móvil de {user} cuando vencen. Calcula el momento a partir de la hora actual que recibes en la etiqueta [ahora ...].
-- Control de luces por domótica (Home Assistant, herramientas mcp__homeassistant__*): encender, apagar y regular las luces por habitación o por nombre. Cuando {user} nombre una habitación o luz ("las luces de mi habitación", "la luz del salón", "la lámpara del sofá"), NO le preguntes cómo se llama en el sistema: primero consulta las áreas y entidades disponibles con GetLiveContext y actúa sobre la que mejor encaje con lo que ha dicho. Los nombres de área en el sistema son literales y pueden sonar a posesivo (p. ej. un área puede llamarse literalmente "Mi habitación"): trátalos como nombres propios, no los interpretes como que falta información. Para atenuar, aplica el porcentaje de brillo indicado. Si {user} se refiere a varias luces a la vez, actúa sobre las de esa habitación. Solo pregunta si hay de verdad varias habitaciones candidatas y es ambiguo cuál quiere. Confirma brevemente lo hecho.
+{capabilities}
 
 Cuando ejecutas una acción, confirmas brevemente qué has hecho. Antes de actuar en algo ambiguo o irreversible, preguntas.
 
@@ -91,11 +86,93 @@ Usuario: ¿El tiempo de mañana?
 Jarvis: Consultando. Mañana en su zona se esperan diecinueve grados y cielo despejado por la tarde. Un buen momento para salir.\
 """
 
+# Línea del prompt de cada capacidad opcional: solo se incluyen las activas, para
+# que Jarvis no ofrezca lo que no tiene (ver active_capabilities()).
+_CAPABILITY_PROMPTS = {
+    "media": (
+        "- Control de altavoces Google Cast (reproducir una URL de audio, pausar, volumen): el altavoz por defecto es \"Salón\"."
+    ),
+    "youtube": (
+        "- Música por YouTube en modo radio (youtube_play): para \"pon música de X en el salón\". Suena lo pedido y luego temas parecidos, sin repetir. Es la forma POR DEFECTO de poner música ambiente en el salón, porque funciona aunque el altavoz esté en reposo. youtube_skip salta a la siguiente; youtube_stop para la música y cancela la lista (úsalo para \"para la música\" cuando suena YouTube). Para pausar/reanudar, cambiar el volumen o buscar dentro de la canción de lo que suena por YouTube, usa las herramientas de Google Cast: cast_pause, cast_resume, cast_set_volume, cast_seek (ir a un punto absoluto, p. ej. \"ve al minuto 2\") y cast_seek_relative (\"adelanta 30 segundos\", \"retrocede 15\"). Es el mismo altavoz."
+    ),
+    "spotify": (
+        "- Reproducción de Spotify (spotify_play por búsqueda o URI, pausar, siguiente, volumen, qué suena): el dispositivo por defecto es \"Salón\". Spotify SOLO funciona si ya hay un dispositivo activo en Spotify Connect; no despierta un altavoz en reposo. Por eso, para poner música ambiente en el salón usa YouTube (youtube_play); reserva Spotify para controlar una sesión de Spotify que ya esté activa, y Google Cast para reproducir una URL de audio concreta."
+    ),
+    "notify": (
+        "- Notificación push al móvil de {user} (notify_user): para avisarle de algo o confirmarle el final de una tarea. No la uses para responder dentro de la conversación; solo cuando proceda un aviso al móvil."
+    ),
+    "reminders": (
+        "- Recordatorios y temporizadores (set_reminder, list_reminders, cancel_reminder): programa avisos a futuro que llegan al móvil de {user} cuando vencen. Calcula el momento a partir de la hora actual que recibes en la etiqueta [ahora ...]."
+    ),
+    "homeassistant": (
+        "- Control de luces por domótica (Home Assistant, herramientas mcp__homeassistant__*): encender, apagar y regular las luces por habitación o por nombre. Cuando {user} nombre una habitación o luz (\"las luces de mi habitación\", \"la luz del salón\", \"la lámpara del sofá\"), NO le preguntes cómo se llama en el sistema: primero consulta las áreas y entidades disponibles con GetLiveContext y actúa sobre la que mejor encaje con lo que ha dicho. Los nombres de área en el sistema son literales y pueden sonar a posesivo (p. ej. un área puede llamarse literalmente \"Mi habitación\"): trátalos como nombres propios, no los interpretes como que falta información. Para atenuar, aplica el porcentaje de brillo indicado. Si {user} se refiere a varias luces a la vez, actúa sobre las de esa habitación. Solo pregunta si hay de verdad varias habitaciones candidatas y es ambiguo cuál quiere. Confirma brevemente lo hecho."
+    ),
+    "workspace": (
+        "- Proyectos de desarrollo de {user} (herramientas mcp__workspace__*): estado de un proyecto (\"¿en qué me quedé con X?\" → project_status, resúmelo en dos o tres frases), tareas pendientes (todo_list), qué se ha hecho últimamente (recent_activity) y si hay algo sin subir (unpushed). Notas: cuando {user} diga \"apunta…\" o \"anota…\", usa note_add sin pedir confirmación y repite brevemente lo apuntado; si a continuación lo corrige, usa note_edit con el id que devolvió note_add (si no lo tienes, búscalo con todo_list); si pide quitarla, note_delete. Solo puedes escribir notas en ese Inbox; no ofrezcas editar planes ni código."
+    ),
+}
+
 # Nombre con el que Jarvis se dirige a su usuario. Configurable para no dejar
 # un nombre propio fijo en el código (se sustituye con replace y no con format
 # porque el prompt podría contener llaves literales).
 USER_NAME = os.getenv("JARVIS_USER_NAME", "Tony")
-DEFAULT_SYSTEM_PROMPT = _DEFAULT_SYSTEM_PROMPT_TEMPLATE.replace("{user}", USER_NAME)
+
+# Capacidades opcionales, en el orden en que aparecen en el prompt.
+CAPABILITIES = tuple(_CAPABILITY_PROMPTS)
+
+
+def _capability_ready(name: str) -> bool:
+    """True si la capacidad tiene la configuración que necesita para funcionar.
+
+    Las que dependen de un servicio externo se desactivan solas si falta su
+    configuración: así una herramienta no se ofrece para fallar después.
+    """
+    env = lambda key: os.getenv(key, "").strip()  # noqa: E731
+    checks = {
+        "notify": lambda: bool(env("NTFY_TOPIC")),
+        # Los recordatorios se entregan por ntfy: sin él no tienen salida.
+        "reminders": lambda: bool(env("NTFY_TOPIC")),
+        "spotify": lambda: bool(env("SPOTIFY_CLIENT_ID") and env("SPOTIFY_CLIENT_SECRET")),
+        "homeassistant": lambda: bool(env("HA_URL") and env("HA_TOKEN")),
+        "workspace": lambda: bool(env("JARVIS_WORKSPACE")),
+    }
+    return checks.get(name, lambda: True)()
+
+
+def active_capabilities(config: "JarvisConfig | None" = None) -> list[str]:
+    """Capacidades que se cargan, combinando tres filtros.
+
+    1. ``JARVIS_CAPABILITIES`` (``.env``): lista separada por comas de las que se
+       quieren; vacía o ``all`` = todas.
+    2. Los flags ``enable_*`` de ``JarvisConfig`` (para scripts y tests).
+    3. Que tengan su configuración (``_capability_ready``).
+
+    YouTube depende de Google Cast (reproduce en sus altavoces y el prompt
+    deriva pausa/volumen a las herramientas cast_*), así que sin media no hay
+    YouTube.
+    """
+    raw = os.getenv("JARVIS_CAPABILITIES", "").strip().lower()
+    wanted = set(CAPABILITIES) if raw in ("", "all") else {c.strip() for c in raw.split(",") if c.strip()}
+    active = [
+        c for c in CAPABILITIES
+        if c in wanted
+        and (config is None or getattr(config, f"enable_{c}", True))
+        and _capability_ready(c)
+    ]
+    if "media" not in active and "youtube" in active:
+        active.remove("youtube")
+    return active
+
+
+def build_system_prompt(capabilities: list[str]) -> str:
+    """Prompt por defecto con solo las líneas de las capacidades activas."""
+    texts = dict(_CAPABILITY_PROMPTS)
+    # Workspace sin remoto de notas es solo lectura: que no prometa apuntar nada.
+    if not os.getenv("JARVIS_NOTES_REMOTE", "").strip():
+        texts["workspace"] = texts["workspace"].split(" Notas:")[0]
+    lines = "\n".join(texts[c] for c in capabilities)
+    prompt = _DEFAULT_SYSTEM_PROMPT_TEMPLATE.replace("{capabilities}\n", lines + "\n" if lines else "")
+    return prompt.replace("{user}", USER_NAME)
 
 # Número máximo de turnos del historial que se pasan al hacer ratchet-up.
 _HISTORY_CONTEXT_MAX_TURNS = 5
@@ -108,24 +185,30 @@ class JarvisConfig:
     """Configuración del núcleo.
 
     Attributes:
-        system_prompt: Persona/instrucciones de sistema del asistente.
+        system_prompt: Persona/instrucciones de sistema del asistente. Si es None
+            (por defecto), se construye con las capacidades activas.
         model: ID de modelo fijo. Si es None y model_routing=True, se elige
             automáticamente en el primer ask() según la complejidad del prompt.
         model_routing: Si True (por defecto), activa el enrutado automático de
             modelos cuando model=None, incluyendo el ratchet-up entre turnos.
         permission_mode: Política de permisos del Agent SDK.
         allowed_tools: Herramientas que Jarvis puede usar sin confirmación.
+        enable_*: Interruptores por capacidad para scripts y tests. En despliegue
+            se usa JARVIS_CAPABILITIES (ver active_capabilities()); una capacidad
+            se carga solo si pasa los tres filtros.
         enable_media: Si True, carga la capacidad de control de medios (Google Cast).
         enable_notify: Si True, carga la capacidad de notificaciones push (ntfy).
         enable_reminders: Si True, carga la capacidad de recordatorios/temporizadores.
         enable_spotify: Si True, carga la capacidad de control de Spotify (Connect).
         enable_youtube: Si True, carga la capacidad de música por YouTube (Cast).
+        enable_workspace: Si True, carga la capacidad de workspace (estado de
+            proyectos y notas). Solo se registra si JARVIS_WORKSPACE está definido.
         enable_homeassistant: Si True, registra el servidor MCP remoto de Home
             Assistant (domótica: luces). Solo se activa si HA_URL y HA_TOKEN están
             en el entorno; sin ellas se omite (p. ej. en dev sin HA a mano).
     """
 
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    system_prompt: str | None = None
     model: str | None = None
     model_routing: bool = True
     permission_mode: str = "default"
@@ -136,6 +219,7 @@ class JarvisConfig:
     enable_spotify: bool = True
     enable_youtube: bool = True
     enable_homeassistant: bool = True
+    enable_workspace: bool = True
 
 
 class JarvisCore:
@@ -166,13 +250,17 @@ class JarvisCore:
         # Historial de turnos: (prompt_usuario, respuesta_completa).
         # Usado para construir el contexto al hacer ratchet-up.
         self._history: list[tuple[str, str]] = []
+        # Capacidades cargadas (las fija __aenter__); legible por los front-ends.
+        self.capabilities: list[str] = []
 
     async def __aenter__(self) -> "JarvisCore":
         # Prepara herramientas y MCP pero NO conecta: la conexión es perezosa.
         self._pending_tools = list(self.config.allowed_tools)
         self._pending_mcp = {}
+        self.capabilities = active_capabilities(self.config)
+        caps = self.capabilities
 
-        if self.config.enable_media:
+        if "media" in caps:
             from src.capabilities.media_cast import (
                 MEDIA_TOOL_NAMES,
                 SERVER_NAME,
@@ -181,7 +269,7 @@ class JarvisCore:
             self._pending_mcp[SERVER_NAME] = build_media_server()
             self._pending_tools.extend(MEDIA_TOOL_NAMES)
 
-        if self.config.enable_notify:
+        if "notify" in caps:
             from src.capabilities.notify import (
                 NOTIFY_TOOL_NAMES,
                 SERVER_NAME as NOTIFY_SERVER,
@@ -190,7 +278,7 @@ class JarvisCore:
             self._pending_mcp[NOTIFY_SERVER] = build_notify_server()
             self._pending_tools.extend(NOTIFY_TOOL_NAMES)
 
-        if self.config.enable_reminders:
+        if "reminders" in caps:
             from src.capabilities.reminders import (
                 REMINDER_TOOL_NAMES,
                 SERVER_NAME as REMINDERS_SERVER,
@@ -199,7 +287,7 @@ class JarvisCore:
             self._pending_mcp[REMINDERS_SERVER] = build_reminders_server()
             self._pending_tools.extend(REMINDER_TOOL_NAMES)
 
-        if self.config.enable_spotify:
+        if "spotify" in caps:
             from src.capabilities.spotify import (
                 SPOTIFY_TOOL_NAMES,
                 SERVER_NAME as SPOTIFY_SERVER,
@@ -208,7 +296,7 @@ class JarvisCore:
             self._pending_mcp[SPOTIFY_SERVER] = build_spotify_server()
             self._pending_tools.extend(SPOTIFY_TOOL_NAMES)
 
-        if self.config.enable_youtube:
+        if "youtube" in caps:
             from src.capabilities.youtube import (
                 YOUTUBE_TOOL_NAMES,
                 SERVER_NAME as YOUTUBE_SERVER,
@@ -217,7 +305,17 @@ class JarvisCore:
             self._pending_mcp[YOUTUBE_SERVER] = build_youtube_server()
             self._pending_tools.extend(YOUTUBE_TOOL_NAMES)
 
-        if self.config.enable_homeassistant:
+        if "workspace" in caps:
+            from src.capabilities import workspace
+
+            # Gated por entorno como Home Assistant: sin JARVIS_WORKSPACE (dev, repo
+            # público) se omite sin romper el resto. Las herramientas de notas solo
+            # se añaden si además hay JARVIS_NOTES_REMOTE.
+            if workspace.is_enabled():
+                self._pending_mcp[workspace.SERVER_NAME] = workspace.build_workspace_server()
+                self._pending_tools.extend(workspace.tool_names())
+
+        if "homeassistant" in caps:
             # Home Assistant es un servidor MCP REMOTO (SSE), a diferencia del
             # resto de capacidades que corren in-process. El Agent SDK habla MCP
             # SSE de forma nativa (McpSSEServerConfig), así que basta con pasar el
@@ -251,7 +349,7 @@ class JarvisCore:
             extra_context: Texto adicional que se añade al final del system prompt.
                 Se usa para inyectar el historial previo al hacer ratchet-up.
         """
-        system = self.config.system_prompt
+        system = self.config.system_prompt or build_system_prompt(self.capabilities)
         if extra_context:
             system = system + "\n\n" + extra_context
 
