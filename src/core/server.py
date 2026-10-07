@@ -38,7 +38,8 @@ from fastapi.staticfiles import StaticFiles
 from src.capabilities import youtube as media_player
 from src.capabilities.reminders import shutdown_scheduler, start_scheduler
 from src.core import tts_store
-from src.core.jarvis import JarvisConfig, JarvisCore
+from src.capabilities import agents
+from src.core.jarvis import JarvisConfig, JarvisCore, active_capabilities
 from src.core.session import FAREWELL, is_closing
 from src.core.voice_ws import get_models_async, voice_endpoint
 
@@ -67,11 +68,20 @@ async def lifespan(app: FastAPI):
     preload = None
     if os.environ.get("JARVIS_STT_PRELOAD", "1") != "0":
         preload = asyncio.create_task(_preload_voice_models())
+    # Avisos por ntfy de los agentes (Hito 9): solo con ambas capacidades activas.
+    watcher = None
+    caps = active_capabilities()
+    if "agents" in caps and "notify" in caps:
+        from src.capabilities.notify import publish
+
+        watcher = asyncio.create_task(agents.watch_loop(publish))
     try:
         yield
     finally:
         if preload is not None:
             preload.cancel()
+        if watcher is not None:
+            watcher.cancel()
         shutdown_scheduler()
 
 
@@ -87,6 +97,18 @@ async def _preload_voice_models() -> None:
 
 
 app = FastAPI(title="Jarvis Core API", version="0.1.0", lifespan=lifespan)
+
+
+@app.get("/agents")
+async def get_agents() -> list[dict]:
+    """Estado de los agentes del worker (para la UI y la futura oficina pixel art).
+
+    Returns:
+        Lista de agentes (vacía si la capacidad no está configurada).
+    """
+    if not agents.is_enabled():
+        return []
+    return await agents.list_agents()
 
 
 @app.get("/health")

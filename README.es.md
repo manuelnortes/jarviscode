@@ -41,6 +41,8 @@ simplemente front-ends intercambiables que hablan con él.
   - **Recordatorios y temporizadores** que sobreviven a reinicios (APScheduler + SQLite), entregados por ntfy.
   - **Domótica** a través del servidor MCP de Home Assistant (luces por habitación o por nombre).
   - **Workspace**: el estado de tus proyectos de desarrollo por voz, y notas dictadas que se guardan en git.
+  - **Agentes en segundo plano**: delega tareas en agentes de Claude que trabajan sobre un repo en un
+    contenedor aislado mientras sigues hablando; Jarvis los vigila y te avisa cuando terminan.
 
 Cada capacidad se puede activar o desactivar: ver [Capacidades](#capacidades).
 
@@ -55,7 +57,7 @@ El diseño y sus decisiones están en [docs/arquitectura.md](docs/arquitectura.m
                                         │        │ Claude Agent SDK (Haiku/Sonnet/Opus)   │
                                         │        └─ Tools MCP: web · Cast · YouTube ·     │
                                         │           Spotify · ntfy · recordatorios · HA · │
-                                        │           workspace                            │
+                                        │           workspace · agents                   │
                                         └────────────────────────────────────────────────┘
                                                  │ respuestas: stream de audio o Google Cast
 ```
@@ -114,6 +116,7 @@ El system prompt solo describe las capacidades activas. La búsqueda web está s
 | `notify` | Notificaciones push al móvil | Un topic de ntfy: `NTFY_TOPIC` (+ `NTFY_BASE_URL`, `NTFY_TOKEN`) | `NTFY_TOPIC` vacío |
 | `reminders` | Recordatorios y temporizadores que sobreviven a reinicios | `notify` (se entregan por ahí) | `NTFY_TOPIC` vacío |
 | `homeassistant` | Luces por habitación o por nombre | Home Assistant con la integración MCP Server; `HA_URL`, `HA_TOKEN` | falta la URL o el token |
+| `agents` | Agentes de Claude en segundo plano sobre tus repos: "que un agente revise X", "¿cómo van?", "¿qué ha encontrado?" (solo lectura en esta versión) | El contenedor `jarvis-worker`; ver abajo | `JARVIS_AGENTS_URL` vacío |
 | `workspace` | Tus proyectos por voz: "¿en qué me quedé con X?", tareas pendientes, commits recientes, qué falta por subir; notas dictadas en un *Inbox* | Tu carpeta de proyectos montada en solo lectura; ver abajo | `JARVIS_WORKSPACE` vacío |
 
 ### Configurar workspace
@@ -131,6 +134,34 @@ Docker Compose lo fusiona solo) y pon las rutas de tu máquina. Después, en el 
 Las notas se commitean y se **suben solas** como `Jarvis <jarvis@localhost>`, un commit por cambio
 (añadir, corregir, borrar), sin reescribir nunca el historial. Jarvis repite lo que ha apuntado;
 dile "no, era…" para corregirlo.
+
+### Configurar agentes
+
+Los agentes corren en un **contenedor aparte**, `jarvis-worker` (perfil de Compose `agents`), así nunca
+ven el `.env` del núcleo, tu carpeta de proyectos ni otros tokens: solo el token de Claude, sus propios
+clones y los bare repos que permitas. Escucha solo en `127.0.0.1` y exige un token compartido. Cada
+agente es una sesión de Claude Code (Sonnet por defecto) sobre su propio clon del repo.
+
+En esta versión los agentes son **de solo lectura**: leen el código y buscan en la web, y después
+informan. Escribir código en ramas con pull requests ligeros es el siguiente paso (ver Hoja de ruta).
+
+1. En el `.env`: `JARVIS_AGENTS_URL=http://127.0.0.1:8113`, un `JARVIS_WORKER_TOKEN` aleatorio y
+   `JARVIS_AGENT_REPOS=<repo>[,<repo>…]`.
+2. En `docker-compose.override.yml`, monta cada bare repo permitido en `/repos/<repo>.git` para el
+   servicio `jarvis-worker` (ver `docker-compose.override.example.yml`).
+3. `docker compose --profile agents up -d --build jarvis-worker` y después reconstruye el núcleo.
+
+| Variable | Por defecto | Para qué |
+|---|---|---|
+| `JARVIS_AGENTS_MAX` | `2` | Agentes **trabajando** a la vez; el resto espera en cola |
+| `JARVIS_AGENT_MODEL` | `claude-sonnet-4-6` | Modelo de los agentes |
+| `JARVIS_AGENT_IDLE_TTL` | `3600` | Segundos que un agente terminado conserva su sesión (y la caché de prompt caliente) para seguir |
+| `JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS` | `3600` | Timeout de la sesión de voz mientras gestiona agentes vivos (en vez de 90 s) |
+| `JARVIS_WORKER_MEM_LIMIT` | `4g` | Tope de RAM del worker (~0,35 GB por sesión de agente viva) |
+
+Estados de un agente (`GET /agents`): `queued`, `working`, `idle` (terminado, sesión conservada para
+seguir), `done`, `failed`, `cancelled`. Llega un aviso push (ntfy) cuando un agente termina o falla.
+Pregunta "¿cómo van los agentes?", "¿qué ha encontrado?", "dile que también…" o "cancélalo".
 
 ## Desarrollo local
 
@@ -174,7 +205,8 @@ Sonnet/Opus y el umbral de longitud, todo comentado y editable sin tocar el núc
 ```
 src/
 ├── core/          # Núcleo headless: JarvisCore, enrutado, servidor FastAPI, WS de voz, clips TTS
-├── capabilities/  # Tools MCP: Cast, YouTube, Spotify, ntfy, recordatorios, workspace
+├── capabilities/  # Tools MCP: Cast, YouTube, Spotify, ntfy, recordatorios, workspace, agents
+├── worker/        # Runner de agentes (contenedor aparte): cola, sesiones de Claude, estados
 ├── voice/         # Captura de audio, STT (faster-whisper), TTS (Piper)
 ├── frontends/     # REPL de texto, cliente WS, push-to-talk de escritorio
 ├── satellite/     # Satélite ambiente: micro, wake word, VAD, máquina de estados
@@ -187,6 +219,7 @@ scripts/           # Smoke test, diagnósticos y pruebas end-to-end
 - Descargar STT/TTS en una RTX de sobremesa despertada bajo demanda (Wake-on-LAN), con el servidor
   siempre encendido como respaldo.
 - Voces de personaje con RVC sobre Piper.
+- Agentes que programan: ramas, tests y pull requests ligeros (GitHub/Bitbucket más adelante).
 - Más habitaciones (satélites), front-end de Telegram, calendario y correo.
 
 ## Licencia

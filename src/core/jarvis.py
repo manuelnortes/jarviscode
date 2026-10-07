@@ -110,6 +110,9 @@ _CAPABILITY_PROMPTS = {
     "workspace": (
         "- Proyectos de desarrollo de {user} (herramientas mcp__workspace__*): estado de un proyecto (\"¿en qué me quedé con X?\" → project_status, resúmelo en dos o tres frases), tareas pendientes (todo_list), qué se ha hecho últimamente (recent_activity) y si hay algo sin subir (unpushed). No puedes commitear ni subir nada: de lo pendiente solo informas. Notas: cuando {user} diga \"apunta…\" o \"anota…\", usa note_add sin pedir confirmación y repite brevemente lo apuntado; si a continuación lo corrige, usa note_edit con el id que devolvió note_add (si no lo tienes, búscalo con todo_list); si pide quitarla, note_delete. Solo puedes escribir notas en ese Inbox; no ofrezcas editar planes ni código."
     ),
+    "agents": (
+        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user} (por ahora solo leen e investigan: revisar código, proponer mejoras, buscar información). Úsalos cuando {user} pida encargar, delegar o \"que un agente mire…\". Redacta la tarea de forma completa (el agente no ve esta conversación). Tras agent_start di brevemente que el agente está en marcha y que le avisarás; no esperes al resultado. Para \"¿cómo van?\" usa agent_status; para contar lo que encontró, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno que está en idle, agent_message; para pararlo, agent_cancel. Refiérete a cada agente por su repositorio y su tarea, no por el id. Mientras los agentes solo puedan leer, no ofrezcas que implementen cambios."
+    ),
 }
 
 # Nombre con el que Jarvis se dirige a su usuario. Configurable para no dejar
@@ -135,6 +138,7 @@ def _capability_ready(name: str) -> bool:
         "spotify": lambda: bool(env("SPOTIFY_CLIENT_ID") and env("SPOTIFY_CLIENT_SECRET")),
         "homeassistant": lambda: bool(env("HA_URL") and env("HA_TOKEN")),
         "workspace": lambda: bool(env("JARVIS_WORKSPACE")),
+        "agents": lambda: bool(env("JARVIS_AGENTS_URL")),
     }
     return checks.get(name, lambda: True)()
 
@@ -203,6 +207,8 @@ class JarvisConfig:
         enable_youtube: Si True, carga la capacidad de música por YouTube (Cast).
         enable_workspace: Si True, carga la capacidad de workspace (estado de
             proyectos y notas). Solo se registra si JARVIS_WORKSPACE está definido.
+        enable_agents: Si True, carga la capacidad de agentes en segundo plano.
+            Solo se registra si JARVIS_AGENTS_URL está definido.
         enable_homeassistant: Si True, registra el servidor MCP remoto de Home
             Assistant (domótica: luces). Solo se activa si HA_URL y HA_TOKEN están
             en el entorno; sin ellas se omite (p. ej. en dev sin HA a mano).
@@ -220,6 +226,7 @@ class JarvisConfig:
     enable_youtube: bool = True
     enable_homeassistant: bool = True
     enable_workspace: bool = True
+    enable_agents: bool = True
 
 
 class JarvisCore:
@@ -314,6 +321,15 @@ class JarvisCore:
             if workspace.is_enabled():
                 self._pending_mcp[workspace.SERVER_NAME] = workspace.build_workspace_server()
                 self._pending_tools.extend(workspace.tool_names())
+
+        if "agents" in caps:
+            from src.capabilities.agents import (
+                AGENT_TOOL_NAMES,
+                SERVER_NAME as AGENTS_SERVER,
+                build_agents_server,
+            )
+            self._pending_mcp[AGENTS_SERVER] = build_agents_server()
+            self._pending_tools.extend(AGENT_TOOL_NAMES)
 
         if "homeassistant" in caps:
             # Home Assistant es un servidor MCP REMOTO (SSE), a diferencia del

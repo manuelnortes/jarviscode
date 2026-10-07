@@ -52,6 +52,8 @@ SONNET_SIGNALS: frozenset[str] = frozenset([
     # "nota" cubre anota/notas; las correcciones heredan Sonnet por ratchet-up.
     "apunta", "nota", "en qué me quedé", "en que me quede", "en qué me quede",
     "pendiente", "sin subir", "proyecto",
+    # Gestión de agentes en segundo plano: mínimo Sonnet.
+    "agente", "encarga", "delega",
 ])
 
 # ── Señales de Opus ────────────────────────────────────────────────────────────

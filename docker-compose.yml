@@ -114,6 +114,49 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # Worker de agentes (Hito 9): ejecuta agentes de Claude en segundo plano,
+  # aislado del núcleo. Opcional: perfil "agents" →
+  #   docker compose --profile agents up -d --build jarvis-worker
+  # Los bare repos permitidos se montan en /repos desde el
+  # docker-compose.override.yml (ver docker-compose.override.example.yml).
+  jarvis-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: jarvis-worker
+    profiles: ["agents"]
+    restart: unless-stopped
+    # Sin env_file a propósito: el .env del núcleo lleva tokens (HA, ntfy…) que
+    # los agentes no deben ver. Solo pasan estas variables.
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      JARVIS_WORKER_TOKEN: ${JARVIS_WORKER_TOKEN:-}
+      JARVIS_AGENT_REPOS: ${JARVIS_AGENT_REPOS:-}
+      JARVIS_AGENTS_MAX: ${JARVIS_AGENTS_MAX:-2}
+      JARVIS_AGENT_MODEL: ${JARVIS_AGENT_MODEL:-claude-sonnet-4-6}
+      JARVIS_AGENT_IDLE_TTL: ${JARVIS_AGENT_IDLE_TTL:-3600}
+      TZ: ${TZ:-Europe/Madrid}
+    # Solo localhost: el núcleo (host-net) llega por 127.0.0.1.
+    ports:
+      - "127.0.0.1:${JARVIS_WORKER_PORT:-8113}:8113"
+    volumes:
+      - jarvis-worker-data:/data
+    # Cada agente es un proceso del CLI (~0,35 GB) más lo que ejecute (tests…).
+    mem_limit: ${JARVIS_WORKER_MEM_LIMIT:-4g}
+    memswap_limit: ${JARVIS_WORKER_MEM_LIMIT:-4g}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8113/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 volumes:
   jarvis-models:
   jarvis-data:
+  jarvis-worker-data:

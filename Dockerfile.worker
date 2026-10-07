@@ -1,0 +1,37 @@
+# === Worker de agentes de Jarvis (Hito 9) ===
+# Contenedor APARTE del núcleo a propósito: los agentes tienen herramientas de
+# código (y en la Fase 2, escritura), así que no deben ver el workspace, los .env
+# de otros proyectos ni los tokens del núcleo. Aquí solo hay el token de Claude,
+# los clones de trabajo y los bare repos de la lista blanca.
+FROM python:3.13-slim
+
+# Node.js 20 + CLI de Claude Code (el Agent SDK lo lanza como subproceso) y git.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg git \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && apt-get purge -y gnupg \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir claude-agent-sdk fastapi "uvicorn[standard]"
+
+# Usuario sin privilegios: el CLI no acepta bypassPermissions como root, y así un
+# agente no puede tocar nada fuera de /data aunque lo intente. /data se crea con
+# su dueño para que el volumen nombrado herede los permisos al crearse.
+RUN useradd --create-home --uid 1000 agent && mkdir -p /data && chown agent:agent /data
+
+WORKDIR /app
+COPY src/__init__.py src/__init__.py
+COPY src/worker/ src/worker/
+
+USER agent
+# Identidad de los commits de los agentes (Fase 2). safe.directory: los bare
+# repos montados son de otro usuario (root en el host) y git rechazaría usarlos.
+RUN git config --global user.name "Jarvis Agent" \
+    && git config --global user.email "agent@localhost" \
+    && git config --global safe.directory '*'
+
+EXPOSE 8113
+CMD ["python", "-m", "src.worker.app"]

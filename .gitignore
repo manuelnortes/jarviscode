@@ -33,3 +33,6 @@ data/
 
 # Override local del compose (rutas de la máquina; plantilla versionada aparte).
 docker-compose.override.yml
+
+# Copias de seguridad hechas a mano en el servidor antes de tocar config.
+*.bak-*

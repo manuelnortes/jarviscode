@@ -12,3 +12,9 @@ services:
       - /ruta/a/bare-repos:/opt/git:ro
       # Único escribible: el remoto de las notas (push del Inbox).
       - /ruta/a/bare-repos/notes.git:/opt/git/notes.git
+
+  # Worker de agentes (perfil "agents"): SOLO los bare repos que los agentes
+  # pueden usar (los mismos que JARVIS_AGENT_REPOS), en /repos/<repo>.git.
+  jarvis-worker:
+    volumes:
+      - /ruta/a/bare-repos/mi-repo.git:/repos/mi-repo.git

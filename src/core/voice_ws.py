@@ -67,6 +67,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from src.capabilities import media_cast
 from src.core import tts_store
+from src.capabilities import agents
 from src.core.jarvis import JarvisCore
 from src.core.session import FAREWELL, is_cancel, is_closing
 from src.voice.stt import WhisperSTT
@@ -137,6 +138,12 @@ _MIN_UTTERANCE_BYTES = int(_INPUT_SAMPLE_RATE * _MIN_UTTERANCE_SECONDS) * 2  # I
 # demasiado corta. Comprobación PEREZOSA (no hay timers de fondo): solo se mira al
 # llegar el próximo utterance_start.
 SESSION_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_WEB_SESSION_TIMEOUT_SECONDS", "90"))
+# TTL largo para una sesión que gestiona agentes (Hito 9): mientras queden agentes
+# vivos, reciclar a los 90 s haría perder el contexto de la gestión. 1 h = la
+# duración de la caché de prompt con la suscripción.
+AGENTS_SESSION_TIMEOUT_SECONDS = float(
+    os.environ.get("JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS", "3600")
+)
 
 # Modelos de voz cargados una sola vez y compartidos por todas las conexiones:
 # faster-whisper y Piper son caros de inicializar y son thread-safe para nuestro
@@ -361,6 +368,8 @@ async def voice_endpoint(websocket: WebSocket) -> None:
     await jarvis.__aenter__()
     # Reloj monótono de la última interacción; gobierna el reset por inactividad.
     last_activity = time.monotonic()
+    # True si esta sesión ha usado herramientas de agentes → TTL largo (Hito 9).
+    managing_agents = False
 
     # Tarea que procesa el turno en curso (STT→núcleo→TTS) o una repetición. Vive
     # en paralelo al bucle de mensajes para que `stop`/barge-in puedan cortarla.
@@ -407,11 +416,13 @@ async def voice_endpoint(websocket: WebSocket) -> None:
         Args:
             raw_pcm: PCM Int16 LE 16 kHz mono de la utterance.
         """
-        nonlocal last_activity
+        nonlocal last_activity, managing_agents
         reset_requested = await _handle_utterance(
             websocket, jarvis, stt, tts, raw_pcm, turn, output_mode, cast_device
         )
         last_activity = time.monotonic()
+        if any(t.startswith("mcp__agents__") for t in jarvis.last_tools_used):
+            managing_agents = True
         if reset_requested:
             await reset_core("ended")
             last_activity = time.monotonic()
@@ -425,8 +436,9 @@ async def voice_endpoint(websocket: WebSocket) -> None:
         Args:
             reason: Motivo del reset (``timeout``/``ended``/``manual``).
         """
-        nonlocal jarvis
+        nonlocal jarvis, managing_agents
         log.info("VOICE session_reset (%s) tras %d turnos", reason, turn)
+        managing_agents = False
         await jarvis.__aexit__(None, None, None)
         jarvis = JarvisCore()
         await jarvis.__aenter__()
@@ -497,8 +509,12 @@ async def voice_endpoint(websocket: WebSocket) -> None:
                 # Reset PEREZOSO por inactividad: si la conexión lleva mucho
                 # parada, reciclamos a Haiku ANTES de procesar esta utterance.
                 idle = time.monotonic() - last_activity
-                if idle > SESSION_TIMEOUT_SECONDS:
-                    log.info("VOICE inactividad %.0fs > %.0fs", idle, SESSION_TIMEOUT_SECONDS)
+                timeout = SESSION_TIMEOUT_SECONDS
+                # Sesión de gestión de agentes: TTL largo mientras queden vivos.
+                if managing_agents and idle > timeout and await agents.has_active():
+                    timeout = AGENTS_SESSION_TIMEOUT_SECONDS
+                if idle > timeout:
+                    log.info("VOICE inactividad %.0fs > %.0fs", idle, timeout)
                     await reset_core("timeout")
                     last_activity = time.monotonic()
                 if recording:
