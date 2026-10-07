@@ -358,6 +358,12 @@ class JarvisCore:
             permission_mode=self.config.permission_mode,
             model=self.config.model,
             allowed_tools=self._pending_tools,
+            # Herramientas INTEGRADAS de Claude Code disponibles: solo las de la
+            # lista blanca (WebSearch/WebFetch). Sin esto el CLI ofrece todo su
+            # set (Bash, Agent, SendMessage…): allowed_tools solo evita pedir
+            # permiso, no las quita, y el CLI auto-aprueba Bash de solo lectura
+            # (probado 2026-10-07: `date` se ejecutó). Las MCP no se ven afectadas.
+            tools=[t for t in self.config.allowed_tools if not t.startswith("mcp__")],
             mcp_servers=self._pending_mcp,
         )
         self._client = ClaudeSDKClient(options=options)

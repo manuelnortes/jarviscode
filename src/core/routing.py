@@ -47,6 +47,11 @@ SONNET_SIGNALS: frozenset[str] = frozenset([
     "por qué", "por que",
     "qué significa", "que significa",
     "cómo funciona", "como funciona",
+    # Capacidad workspace (proyectos y notas): mínimo Sonnet. Haiku acierta,
+    # pero da más vueltas antes de llegar a la herramienta y escribe en git.
+    # "nota" cubre anota/notas; las correcciones heredan Sonnet por ratchet-up.
+    "apunta", "nota", "en qué me quedé", "en que me quede", "en qué me quede",
+    "pendiente", "sin subir", "proyecto",
 ])
 
 # ── Señales de Opus ────────────────────────────────────────────────────────────
