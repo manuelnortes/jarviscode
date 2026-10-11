@@ -43,6 +43,10 @@ simplemente front-ends intercambiables que hablan con él.
   - **Workspace**: el estado de tus proyectos de desarrollo por voz, y notas dictadas que se guardan en git.
   - **Agentes en segundo plano**: delega tareas en agentes de Claude que trabajan sobre un repo en un
     contenedor aislado mientras sigues hablando; Jarvis los vigila y te avisa cuando terminan.
+  - **Vision, el gestor autónomo**: una sesión de Opus que revisa los pull requests de los agentes
+    contra el plan del proyecto, los fusiona en `develop`, responde a sus preguntas y lanza el
+    siguiente punto del plan, sin que tengas que estar. Se puede usar sin voz, por HTTP: ver
+    [docs/vision.es.md](docs/vision.es.md).
 
 Cada capacidad se puede activar o desactivar: ver [Capacidades](#capacidades).
 
@@ -147,17 +151,31 @@ Dos modos:
 - **read**: el agente lee el código y busca en la web, y después informa.
 - **code**: el agente trabaja en su propia rama `agent/<id>-<slug>`, pasa los tests y hace commits;
   el runner empuja **solo esa rama** y abre un **pull request ligero** (título, descripción, diffstat,
-  resultado de los tests) que revisas tú. Nunca se fusiona nada solo.
+  resultado de los tests). Los agentes de código salen de una **rama de integración** (`develop`, que
+  se crea y se pone al día con la principal sola); a la rama principal no llega nada sin ti.
 
-Los agentes pueden **preguntar** mientras trabajan: las aclaraciones van a Jarvis (el gestor), que
-responde o te las pasa; las decisiones de diseño van directamente a ti; si el gestor no responde en
-5 minutos, la pregunta pasa a ti. Un agente que espera libera su hueco para los demás.
+**Vision** es el gestor ([docs/vision.es.md](docs/vision.es.md)): revisa cada PR terminado contra el
+`PLAN.md` del proyecto y lo fusiona en `develop`, pide cambios al agente o te lo pasa, y después lanza
+el siguiente punto del plan (un punto por agente). `develop` → principal lo revisas tú. La fusión está
+protegida en el código: solo en la rama de integración y solo con los tests en verde. También puedes
+fusionar o cerrar un PR desde el panel **PRs** de la web (con su diff completo) o pidiéndoselo a Jarvis.
+
+Los agentes pueden **preguntar** mientras trabajan: las preguntas van primero a Vision, que responde
+lo que el plan deja claro y te escala el resto; si no responde en `JARVIS_AGENT_MANAGER_TIMEOUT`, la
+pregunta pasa a ti. Un agente que espera libera su hueco para los demás. Un agente que necesita el
+trabajo de otro puede esperarlo: Vision le dice que siga cuando ese PR se fusiona.
 
 Un agente terminado queda en **idle** con su sesión (y la caché de prompt de una hora caliente) para
 seguir. A los 35 minutos recibes un aviso; a los 45 escribe un **handoff** (en modo código, un
 fichero con el nombre de su rama, `agent/<id>-<slug>.md`, commiteado en la rama) y a los 55 se
-cierra la sesión. Si le escribes después, retoma desde el handoff en una sesión nueva. Si se alcanza
-el límite de uso de la suscripción, el agente se pausa y continúa solo cuando se reinicia la ventana.
+cierra la sesión. Si le escribes después, retoma desde el handoff en una sesión nueva.
+
+**Uso**: agentes, Vision y tú compartís la misma suscripción. El worker lee el uso real (una sonda de
+1 token a Haiku mientras hay agentes) y, al llegar a `JARVIS_AGENT_USAGE_LIMIT`, no lanza nada y pausa
+los agentes tras guardar su trabajo (handoff); se retoman cuando lo dices, o solos al reiniciarse la
+ventana (`JARVIS_AGENT_USAGE_MODE=autonomous`). Cada +5 % de la ventana de 5 h durante un turno
+(`JARVIS_AGENT_CHECKPOINT`) el agente para, estima lo que le falta y pide a Vision que le recorte el
+alcance si hace falta. `GET /metrics` en el worker da coste, tokens y uso por turno.
 
 1. En el `.env`: `JARVIS_AGENTS_URL=http://127.0.0.1:8113`, un `JARVIS_WORKER_TOKEN` aleatorio y
    `JARVIS_AGENT_REPOS=<repo>[,<repo>…]`.
@@ -174,18 +192,22 @@ el límite de uso de la suscripción, el agente se pausa y continúa solo cuando
 | `JARVIS_AGENTS_MAX` | `2` | Agentes **trabajando** a la vez; el resto espera en cola |
 | `JARVIS_AGENT_MODEL` | `claude-sonnet-4-6` | Modelo de los agentes |
 | `JARVIS_AGENT_IDLE_WARN` / `_HANDOFF_AT` / `_IDLE_TTL` | `2100` / `2700` / `3300` | Ciclo del idle (s): aviso, handoff, cierre de la sesión |
-| `JARVIS_AGENT_MANAGER_TIMEOUT` | `300` | Segundos que una aclaración espera al gestor antes de pasar a ti |
+| `JARVIS_AGENT_MANAGER_TIMEOUT` | `900` | Segundos que una pregunta espera al gestor antes de pasar a ti |
 | `JARVIS_AGENT_TURN_TIMEOUT` | `1800` | Máximo de segundos trabajando por turno (esperar una respuesta no cuenta) |
-| `JARVIS_AGENT_USAGE_LIMIT` | `85` | Salvaguarda (%): con el uso de la ventana de la suscripción a este nivel o más (tu propio uso de Claude incluido), no arrancan agentes ni turnos nuevos; los pausados continúan al reiniciarse la ventana |
+| `JARVIS_AGENT_USAGE_LIMIT` / `_7D` | `60` / `75` | Salvaguarda (%) de la ventana de 5 h / semanal (tu propio uso de Claude incluido): no arrancan agentes y los que trabajan se pausan tras un handoff |
+| `JARVIS_INTEGRATION_BRANCH` | `develop` | Rama donde se fusiona el trabajo autónomo; vacía = desactivada |
 | `JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS` | `3600` | Timeout de la sesión de voz mientras gestiona agentes vivos (en vez de 90 s) |
 | `JARVIS_WORKER_MEM_LIMIT` | `4g` | Tope de RAM del worker (~0,35 GB por sesión de agente viva) |
 
+Las variables propias de Vision (`JARVIS_VISION*`) están en [docs/vision.es.md](docs/vision.es.md#configuración).
+
 Estados de un agente (`GET /agents`): `queued`, `working`, `waiting_input` (ha preguntado algo),
-`idle` (terminado, sesión conservada para seguir), `rate_limited`, `done` (sesión cerrada, se puede
-retomar), `failed`, `cancelled`. Con ntfy llega un aviso cuando un agente termina (con su PR), falla,
+`idle` (terminado, sesión conservada para seguir), `rate_limited`, `paused` (límite de uso, trabajo
+guardado), `done` (sesión cerrada, se puede retomar), `merged`, `failed`, `cancelled`. Con ntfy llega un aviso cuando un agente termina (con su PR), falla,
 se pausa, necesita tu respuesta o lleva un rato en idle; sin ntfy, Jarvis te lo cuenta en tu
-siguiente turno. Pregunta "¿cómo van los agentes?", "¿qué ha encontrado?", "dile que también…",
-"cancélalo". `GET /usage` en el worker muestra el último uso conocido de la ventana de la suscripción.
+siguiente turno. Pregunta "¿cómo van los agentes?", "¿qué ha encontrado?", "lanza el siguiente punto
+de X", "fusiónalo", "cancélalo". Las consultas las responde Jarvis con lo apuntado; las peticiones de
+actuar van a Vision. `GET /usage` en el worker muestra el último uso conocido de la ventana de la suscripción.
 
 ## Desarrollo local
 
@@ -230,7 +252,8 @@ Sonnet/Opus y el umbral de longitud, todo comentado y editable sin tocar el núc
 src/
 ├── core/          # Núcleo headless: JarvisCore, enrutado, servidor FastAPI, WS de voz, clips TTS
 ├── capabilities/  # Tools MCP: Cast, YouTube, Spotify, ntfy, recordatorios, workspace, agents
-├── worker/        # Runner de agentes (contenedor aparte): cola, sesiones de Claude, estados
+├── worker/        # Runner de agentes (contenedor aparte): cola, sesiones de Claude, estados, uso
+├── vision/        # Vision, el gestor autónomo de los agentes (sesión de Opus, herramientas)
 ├── voice/         # Captura de audio, STT (faster-whisper), TTS (Piper)
 ├── frontends/     # REPL de texto, cliente WS, push-to-talk de escritorio
 ├── satellite/     # Satélite ambiente: micro, wake word, VAD, máquina de estados
@@ -243,7 +266,8 @@ scripts/           # Smoke test, diagnósticos y pruebas end-to-end
 - Descargar STT/TTS en una RTX de sobremesa despertada bajo demanda (Wake-on-LAN), con el servidor
   siempre encendido como respaldo.
 - Voces de personaje con RVC sobre Piper.
-- Fusionar por voz los pull requests de los agentes, una vista web de los PR y pull requests en GitHub/Bitbucket.
+- Vision independiente: separarlo del núcleo en un servicio propio, para usar agentes + Vision sin Jarvis.
+- Pull requests en GitHub/Bitbucket y una vista web del PR `develop` → principal.
 - Más habitaciones (satélites), front-end de Telegram, calendario y correo.
 
 ## Licencia

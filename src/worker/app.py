@@ -10,9 +10,13 @@ Endpoints:
     GET  /usage                     último estado del límite de uso de la suscripción
     POST /agents                    {"repo": str, "task": str, "mode": "read"|"code"}
     GET  /agents/{id}
-    POST /agents/{id}/message       {"text": str}
+    POST /agents/{id}/message       {"text": str, "by"?: str}
+    POST /agents/{id}/note          {"text": str} → bitácora del gestor
     POST /agents/{id}/escalate      la pregunta pendiente pasa al usuario
     POST /agents/{id}/cancel
+    GET  /agents/{id}/merge-check   ¿se puede fusionar su PR ahora? (lo fusiona el núcleo)
+    POST /agents/{id}/merged        {"base_sha", "branch_sha", "merge_sha"} tras fusionar
+    POST /agents/{id}/closed        cierra su PR sin fusionar (la rama se queda)
 """
 
 from __future__ import annotations
@@ -67,6 +71,8 @@ class Message(BaseModel):
     """Cuerpo de POST /agents/{id}/message."""
 
     text: str
+    # Quién responde (p. ej. "vision"); queda en la bitácora. Vacío = Jarvis/usuario.
+    by: str = ""
 
 
 @app.get("/health")
@@ -84,6 +90,8 @@ async def list_agents(active: int = 0) -> list[dict]:
 @app.post("/agents", dependencies=[Depends(_auth)])
 async def create_agent(body: NewAgent) -> dict:
     """Encola un agente nuevo."""
+    # Lectura fresca del uso antes de decidir: sin agentes vivos la sonda periódica no corre.
+    await manager.refresh_usage()
     try:
         return manager.create(body.repo, body.task, body.mode)
     except ValueError as exc:
@@ -103,7 +111,16 @@ async def get_agent(agent_id: str) -> dict:
 async def message_agent(agent_id: str, body: Message) -> dict:
     """Mensaje a un agente (seguimiento, aclaración…)."""
     try:
-        return await manager.message(agent_id, body.text)
+        return await manager.message(agent_id, body.text, by=body.by)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/agents/{agent_id}/note", dependencies=[Depends(_auth)])
+async def note_agent(agent_id: str, body: Message) -> dict:
+    """Apunta una decisión en la bitácora del gestor del agente."""
+    try:
+        return manager.note(agent_id, body.text)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -120,7 +137,16 @@ async def escalate_agent(agent_id: str) -> dict:
 @app.get("/usage", dependencies=[Depends(_auth)])
 async def usage() -> dict:
     """Último estado conocido del límite de uso (utilización, reinicio)."""
+    # Sin agentes vivos la sonda periódica no corre: tras un reinicio el uso salía
+    # "desconocido" hasta lanzar algo. Sondea aquí si la lectura es vieja (cada probe_every s).
+    await manager.refresh_usage()
     return manager.usage()
+
+
+@app.get("/metrics", dependencies=[Depends(_auth)])
+async def metrics(last: int = 50) -> dict:
+    """Métricas por turno (coste y uso antes/después) y su resumen."""
+    return manager.metrics(last)
 
 
 @app.post("/agents/{agent_id}/cancel", dependencies=[Depends(_auth)])
@@ -130,6 +156,41 @@ async def cancel_agent(agent_id: str) -> dict:
         return await manager.cancel(agent_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class Merged(BaseModel):
+    """Cuerpo de POST /agents/{id}/merged (SHA para el rollback)."""
+
+    base_sha: str
+    branch_sha: str
+    merge_sha: str
+
+
+@app.get("/agents/{agent_id}/merge-check", dependencies=[Depends(_auth)])
+async def merge_check(agent_id: str) -> dict:
+    """409 con el motivo si el PR del agente no se puede fusionar ahora."""
+    try:
+        return manager.merge_check(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/agents/{agent_id}/merged", dependencies=[Depends(_auth)])
+async def mark_merged(agent_id: str, body: Merged) -> dict:
+    """El núcleo avisa de que ha fusionado el PR del agente."""
+    try:
+        return await manager.mark_merged(agent_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/agents/{agent_id}/closed", dependencies=[Depends(_auth)])
+async def mark_closed(agent_id: str) -> dict:
+    """Cierra el PR del agente sin fusionar (la rama se queda en el bare)."""
+    try:
+        return await manager.mark_closed(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":

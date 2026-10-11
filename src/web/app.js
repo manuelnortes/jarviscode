@@ -926,6 +926,273 @@
   pollMedia();
   setInterval(pollMedia, 1500);
 
+  // ── PRs de los agentes (Hito 9, Fase 3) ──────────────────────────────────────
+  // Chip en la topbar (visible solo si hay PRs) → modal con la lista → detalle con
+  // descripción y diff → "Fusionar" con confirmación. La fusión la hace el núcleo
+  // (POST /api/prs/{id}/merge); por voz se le pide a Vision (user_merge, misma fusión).
+  const prChip = document.getElementById("pr-chip");
+  const prChipCount = document.getElementById("pr-chip-count");
+  const prModal = document.getElementById("pr-modal");
+  const prList = document.getElementById("pr-list");
+  const prDetail = document.getElementById("pr-detail");
+  const prBack = document.getElementById("pr-back");
+  const prHead = document.getElementById("pr-head");
+  const prMerge = document.getElementById("pr-merge");
+  const prDiscard = document.getElementById("pr-discard");
+  const prTitle = document.getElementById("pr-title");
+  const prMeta = document.getElementById("pr-meta");
+  const prMsg = document.getElementById("pr-msg");
+  const prBody = document.getElementById("pr-body");
+  const prDiff = document.getElementById("pr-diff");
+  /** @type {string|null} Agente cuyo PR se muestra en el detalle. */
+  let prCurrent = null;
+
+  /**
+   * Texto corto del estado de los tests de un PR.
+   * @param {object} pr Registro del agente.
+   * @returns {[string, string]} Texto y clase CSS.
+   */
+  function prTests(pr) {
+    if (pr.pr_tests_passed === 1) return ["tests OK", "pr-ok"];
+    if (pr.pr_tests_passed === 0) return ["tests FALLAN", "pr-ko"];
+    return ["tests sin informar", ""];
+  }
+
+  /**
+   * Fecha corta (dd/mm hh:mm) de un timestamp en segundos.
+   * @param {number} ts
+   * @returns {string}
+   */
+  function prDate(ts) {
+    const d = new Date(ts * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getDate())}/${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  /**
+   * Pide JSON a la API y lanza Error con el `detail` si responde con error.
+   * @param {string} url
+   * @param {RequestInit} [opts]
+   */
+  async function prFetch(url, opts) {
+    const res = await fetch(url, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+    return data;
+  }
+
+  /** Actualiza el chip (y la lista si el modal está en la vista de lista). */
+  async function pollPrs() {
+    let prs;
+    try {
+      prs = await prFetch("/api/prs");
+    } catch (_) {
+      return; // sin worker o sin red: el chip se queda como estaba
+    }
+    const open = prs.filter((p) => p.pr_status === "open").length;
+    prChip.hidden = prs.length === 0;
+    prChipCount.textContent = String(open);
+    prChip.classList.toggle("is-empty", open === 0);
+    if (!prModal.hidden && prDetail.hidden) renderPrList(prs);
+  }
+
+  /**
+   * Pinta la lista de PRs (abiertos primero).
+   * @param {object[]} prs
+   */
+  function renderPrList(prs) {
+    prList.replaceChildren();
+    const sorted = [...prs].sort((a, b) =>
+      (a.pr_status === "open" ? 0 : 1) - (b.pr_status === "open" ? 0 : 1));
+    if (!sorted.length) {
+      const li = document.createElement("li");
+      li.className = "pr-empty";
+      li.textContent = "No hay PRs.";
+      prList.append(li);
+    }
+    for (const pr of sorted) {
+      const li = document.createElement("li");
+      li.className = "pr-item" + (pr.pr_status === "open" ? "" : " is-merged");
+      const title = document.createElement("div");
+      title.className = "pr-item__title";
+      title.textContent = pr.pr_title || pr.task;
+      const meta = document.createElement("div");
+      meta.className = "pr-item__meta";
+      const [tests, cls] = prTests(pr);
+      const t = document.createElement("span");
+      t.className = cls;
+      t.textContent = tests;
+      const status = { merged: "FUSIONADO", closed: "CERRADO" }[pr.pr_status] || `ABIERTO · agente ${pr.state}`;
+      meta.append(`${pr.repo} · ${status} · ${prDate(pr.updated_at)} · `, t);
+      li.append(title, meta);
+      li.addEventListener("click", () => openPrDetail(pr.id));
+      prList.append(li);
+    }
+  }
+
+  /**
+   * Pinta un diff unificado con colores por tipo de línea.
+   * @param {string} diff
+   */
+  function renderDiff(diff) {
+    prDiff.replaceChildren();
+    const frag = document.createDocumentFragment();
+    for (const line of (diff || "(sin cambios)").split("\n")) {
+      const span = document.createElement("span");
+      if (line.startsWith("diff --git")) span.className = "d-file";
+      else if (line.startsWith("@@")) span.className = "d-hunk";
+      else if (line.startsWith("+") && !line.startsWith("+++")) span.className = "d-add";
+      else if (line.startsWith("-") && !line.startsWith("---")) span.className = "d-del";
+      span.textContent = line || " ";
+      frag.append(span);
+    }
+    prDiff.append(frag);
+  }
+
+  /**
+   * Muestra un aviso en el detalle (resultado de la fusión o error).
+   * @param {string} text
+   * @param {boolean} [isError]
+   */
+  function prNotice(text, isError = false) {
+    prMsg.textContent = text;
+    prMsg.classList.toggle("is-error", isError);
+    prMsg.hidden = !text;
+  }
+
+  /**
+   * Abre el detalle de un PR (descripción + diff).
+   * @param {string} id Id del agente.
+   */
+  async function openPrDetail(id) {
+    prCurrent = id;
+    prList.hidden = true;
+    prDetail.hidden = false;
+    prBack.hidden = false;
+    prMerge.hidden = true;
+    prDiscard.hidden = true;
+    prNotice("");
+    prTitle.textContent = "Cargando…";
+    prMeta.textContent = "";
+    prBody.textContent = "";
+    prDiff.replaceChildren();
+    let pr;
+    try {
+      pr = await prFetch(`/api/prs/${encodeURIComponent(id)}`);
+    } catch (err) {
+      prTitle.textContent = "—";
+      prNotice(err.message, true);
+      return;
+    }
+    if (prCurrent !== id) return; // el usuario ya cambió de PR
+    fillPrDetail(pr);
+  }
+
+  /**
+   * Rellena el detalle con un PR ya cargado.
+   * @param {object} pr Registro del agente con `diff`.
+   */
+  function fillPrDetail(pr) {
+    prHead.textContent = { merged: "PR FUSIONADO", closed: "PR CERRADO" }[pr.pr_status] || "PR ABIERTO";
+    prTitle.textContent = pr.pr_title || pr.task;
+    const [tests, cls] = prTests(pr);
+    const t = document.createElement("span");
+    t.className = cls;
+    t.textContent = tests;
+    prMeta.replaceChildren(
+      `${pr.repo} · ${pr.branch} → ${pr.base_branch} · agente ${pr.id} (${pr.state}) · `, t);
+    if (pr.pr_status === "merged" && pr.pr_merge_sha) {
+      // Datos para el rollback: antes de la rama (1.er padre) y la rama en sí (2.º).
+      prMeta.append(`\nmerge ${pr.pr_merge_sha.slice(0, 10)} · base anterior ${(pr.pr_base_sha || "").slice(0, 10)}`
+        + ` · punta de la rama ${(pr.pr_branch_sha || "").slice(0, 10)}`);
+      prMeta.style.whiteSpace = "pre-wrap";
+    }
+    prBody.textContent = pr.pr_body || "—";
+    renderDiff(pr.diff);
+    // Solo se ofrece fusionar con el agente parado (mismo criterio que el worker).
+    prMerge.hidden = !(pr.pr_status === "open" && (pr.state === "idle" || pr.state === "done"));
+    // Cerrar también vale con el agente cancelado o fallido (PR huérfano).
+    prDiscard.hidden = !(pr.pr_status === "open" && ["idle", "done", "cancelled", "failed"].includes(pr.state));
+    if (pr.pr_status === "open" && prMerge.hidden) {
+      prNotice(`El agente está "${pr.state}": espera a que termine para fusionar.`);
+    }
+  }
+
+  /** Vuelve a la vista de lista. */
+  function showPrList() {
+    prCurrent = null;
+    prDetail.hidden = true;
+    prList.hidden = false;
+    prBack.hidden = true;
+    prMerge.hidden = true;
+    prDiscard.hidden = true;
+    prHead.textContent = "PRs DE LOS AGENTES";
+    pollPrs();
+  }
+
+  function closePrModal() {
+    prModal.hidden = true;
+  }
+
+  prChip.addEventListener("click", () => {
+    prModal.hidden = false;
+    showPrList();
+  });
+  prBack.addEventListener("click", showPrList);
+  document.getElementById("pr-close").addEventListener("click", closePrModal);
+  document.getElementById("pr-overlay").addEventListener("click", closePrModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !prModal.hidden) closePrModal();
+  });
+
+  prMerge.addEventListener("click", async () => {
+    const id = prCurrent;
+    if (!id) return;
+    const failing = prMeta.querySelector(".pr-ko") ? "\n\n⚠ LOS TESTS FALLAN." : "";
+    if (!window.confirm(`¿Fusionar "${prTitle.textContent}" y borrar su rama?${failing}`)) return;
+    prMerge.disabled = true;
+    prNotice("Fusionando…");
+    try {
+      await prFetch(`/api/prs/${encodeURIComponent(id)}/merge`, { method: "POST" });
+      const pr = await prFetch(`/api/prs/${encodeURIComponent(id)}`);
+      if (prCurrent === id) {
+        fillPrDetail(pr);
+        prNotice("Fusionado. La rama se ha borrado; el merge guarda la base anterior y la punta de la rama.");
+      }
+      pollPrs();
+    } catch (err) {
+      prNotice(err.message, true);
+    } finally {
+      prMerge.disabled = false;
+    }
+  });
+
+  // Cerrar sin fusionar: para PRs redundantes o descartados. La rama se queda en el repo.
+  prDiscard.addEventListener("click", async () => {
+    const id = prCurrent;
+    if (!id) return;
+    if (!window.confirm(`¿Cerrar SIN fusionar "${prTitle.textContent}"? La rama se queda en el repo.`)) return;
+    prDiscard.disabled = true;
+    prNotice("Cerrando…");
+    try {
+      await prFetch(`/api/prs/${encodeURIComponent(id)}/close`, { method: "POST" });
+      const pr = await prFetch(`/api/prs/${encodeURIComponent(id)}`);
+      if (prCurrent === id) {
+        fillPrDetail(pr);
+        prNotice("PR cerrado sin fusionar. La rama sigue en el repo.");
+      }
+      pollPrs();
+    } catch (err) {
+      prNotice(err.message, true);
+    } finally {
+      prDiscard.disabled = false;
+    }
+  });
+
+  // El chip se refresca cada 30 s: los PR cambian a ritmo de agentes, no de segundos.
+  pollPrs();
+  setInterval(pollPrs, 30000);
+
   // ── Demo: estado inicial visible ─────────────────────────────────────────────
   if (DEMO) {
     setMode("speaking", "DEMO · OSCILANDO");

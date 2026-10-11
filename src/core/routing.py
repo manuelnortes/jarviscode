@@ -6,13 +6,16 @@ situación, sin tocar el código del núcleo.
 Niveles:
   Haiku  — respuestas rápidas: chat casual, medios, consultas de estado.
   Sonnet — tareas reales: búsquedas, explicaciones, escritura, preguntas con contexto.
-  Opus   — razonamiento profundo: análisis detallados, planificación, "por qué" complejos.
+  Opus   — razonamiento profundo: análisis detallados, planificación, "por qué" complejos,
+           y gestión de agentes (encargos, PRs, avisos de agentes).
 
 Invocación explícita (ver README.md):
   Prefija el prompt con !haiku, !sonnet u !opus para forzar un modelo concreto.
 """
 
 from __future__ import annotations
+
+import re
 
 # ── IDs de modelo ──────────────────────────────────────────────────────────────
 # Actualiza aquí si Anthropic lanza versiones nuevas.
@@ -52,9 +55,18 @@ SONNET_SIGNALS: frozenset[str] = frozenset([
     # "nota" cubre anota/notas; las correcciones heredan Sonnet por ratchet-up.
     "apunta", "nota", "en qué me quedé", "en que me quede", "en qué me quede",
     "pendiente", "sin subir", "proyecto",
-    # Gestión de agentes en segundo plano: mínimo Sonnet.
-    "agente", "encarga", "delega",
 ])
+
+# ── Señales de gestor (Opus; Sonnet en modo puente) ────────────────────────────
+# Cuando Jarvis hace de team lead (redactar encargos, revisar o fusionar PRs,
+# responder a los agentes) se usa Opus (Hito 9, Fase 4, propuesta "B"). Desde la
+# Fase 5, con Vision activa Jarvis solo hace de puente (reenvía la frase y lee el
+# estado): basta Sonnet, el Opus lo pone Vision. Con
+# límites de palabra: "pr" como substring saltaría con "prueba", "precio"…
+# "revisa" se queda fuera por genérico; "revisa el PR" ya entra por "pr".
+MANAGER_SIGNALS = re.compile(
+    r"\b(agentes?|encarg[ao]s?|encárgale|delega|prs?|pull request|fusi[oó]n\w*|the[ -]?office)\b"
+)
 
 # ── Señales de Opus ────────────────────────────────────────────────────────────
 # Opus se reserva para razonamiento profundo y análisis extensos.
@@ -90,13 +102,14 @@ MODEL_PRIORITY: dict[str, int] = {
 }
 
 
-def classify_model(prompt: str) -> str:
+def classify_model(prompt: str, manager_model: str = MODEL_OPUS) -> str:
     """Elige el modelo según la complejidad inferida del prompt.
 
     Orden de prioridad: Opus > Sonnet > umbral de longitud > Haiku (defecto).
 
     Args:
         prompt: El mensaje del usuario tal cual (sin prefijo de modelo).
+        manager_model: Modelo para la gestión de agentes (Sonnet en modo puente).
 
     Returns:
         ID de modelo: MODEL_OPUS, MODEL_SONNET o MODEL_HAIKU.
@@ -106,6 +119,10 @@ def classify_model(prompt: str) -> str:
     # Razonamiento profundo — mayor prioridad
     if any(s in p for s in OPUS_SIGNALS):
         return MODEL_OPUS
+
+    # Gestión de agentes (el ratchet mantiene el modelo el resto de la conversación)
+    if MANAGER_SIGNALS.search(p):
+        return manager_model
 
     # Tarea real con capacidad moderada
     if any(s in p for s in SONNET_SIGNALS):

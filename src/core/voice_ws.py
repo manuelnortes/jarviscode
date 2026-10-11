@@ -423,7 +423,11 @@ async def voice_endpoint(websocket: WebSocket) -> None:
         last_activity = time.monotonic()
         if any(t.startswith("mcp__agents__") for t in jarvis.last_tools_used):
             managing_agents = True
-        if reset_requested:
+        # Con agentes vivos, la despedida no recicla: perder la conversación es
+        # perder el contexto del gestor (Fase 4). El botón "nueva conversación" sí.
+        if reset_requested and managing_agents and await agents.has_active():
+            log.info("VOICE frase de cierre con agentes vivos: se conserva la conversación")
+        elif reset_requested:
             await reset_core("ended")
             last_activity = time.monotonic()
 

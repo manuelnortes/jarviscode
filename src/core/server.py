@@ -32,13 +32,13 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from src.capabilities import youtube as media_player
 from src.capabilities.reminders import shutdown_scheduler, start_scheduler
 from src.core import tts_store
-from src.capabilities import agents
+from src.capabilities import agents, prs
 from src.core.jarvis import JarvisConfig, JarvisCore, active_capabilities
 from src.core.session import FAREWELL, is_closing
 from src.core.voice_ws import get_models_async, voice_endpoint
@@ -75,9 +75,21 @@ async def lifespan(app: FastAPI):
         from src.capabilities.notify import publish
 
         watcher = asyncio.create_task(agents.watch_loop(publish))
+    # Vision, el gestor autónomo (Hito 9, Fase 4): responde o escala las preguntas
+    # de los agentes sin que el usuario hable con Jarvis.
+    vision = None
+    if "agents" in caps:
+        from src.core.jarvis import USER_NAME
+        from src.vision import session as vision_session
+
+        if vision_session.is_enabled():
+            vision = vision_session.vision_from_env(USER_NAME)
+            vision.start()
     try:
         yield
     finally:
+        if vision is not None:
+            await vision.stop()
         if preload is not None:
             preload.cancel()
         if watcher is not None:
@@ -111,6 +123,67 @@ async def get_agents() -> list[dict]:
     return await agents.list_agents()
 
 
+# ── PRs de los agentes (Hito 9, Fase 3): modal de la web ─────────────────────
+# Lista, diff y fusión. La web va tras NPM + Authelia, como el resto de la API.
+@app.get("/api/prs")
+async def get_prs() -> list[dict]:
+    """Agentes con PR (abierto o fusionado), más recientes primero."""
+    if not agents.is_enabled():
+        return []
+    return await prs.list_prs()
+
+
+@app.get("/api/prs/{agent_id}")
+async def get_pr(agent_id: str) -> dict:
+    """PR de un agente con su diff completo."""
+    try:
+        return await prs.diff(agent_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/prs/{agent_id}/merge")
+async def merge_pr(agent_id: str) -> dict:
+    """Fusiona el PR (la confirmación la pide la web antes de llamar)."""
+    try:
+        return await prs.merge(agent_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/prs/{agent_id}/close")
+async def close_pr(agent_id: str) -> dict:
+    """Cierra el PR sin fusionar (la confirmación la pide la web antes de llamar)."""
+    try:
+        return await prs.close(agent_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# ── Hablar con Vision (Hito 9, Fase 5): Vision es el único gestor de los agentes ──
+# Lo usan la herramienta `vision` de Jarvis (en proceso) y Claude Code con curl
+# (docs/vision.md). Misma protección que el resto de la API (NPM + Authelia).
+@app.post("/vision/message")
+async def vision_message(payload: dict) -> dict:
+    """Manda un mensaje del usuario a Vision y devuelve su respuesta.
+
+    Args:
+        payload: ``{"text": str}``. Si Vision atiende otro evento, espera turno.
+    """
+    from src.vision import session as vision_session
+
+    text = ((payload or {}).get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Falta 'text'.")
+    vision = vision_session.current()
+    if vision is None:
+        raise HTTPException(status_code=503, detail="Vision no está activa.")
+    try:
+        return {"reply": await vision.message(text)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Sonda de vida para healthchecks (Docker, monitores).
@@ -139,6 +212,8 @@ async def ws_chat(websocket: WebSocket) -> None:
     # cerrar el WS: el reset de sesión recrea el núcleo y vuelve a Haiku.
     jarvis = JarvisCore(JarvisConfig())
     await jarvis.__aenter__()
+    # True si esta conversación ha usado herramientas de agentes (como en la voz).
+    managing_agents = False
 
     async def reset_core(reason: str) -> None:
         """Cierra el núcleo actual y abre uno fresco (de vuelta a Haiku).
@@ -146,7 +221,8 @@ async def ws_chat(websocket: WebSocket) -> None:
         Args:
             reason: Motivo (``manual`` por botón, ``ended`` por frase de cierre).
         """
-        nonlocal jarvis
+        nonlocal jarvis, managing_agents
+        managing_agents = False
         await jarvis.__aexit__(None, None, None)
         jarvis = JarvisCore(JarvisConfig())
         await jarvis.__aenter__()
@@ -177,8 +253,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "error", "message": "Prompt vacío."})
                 continue
 
-            # Frase de cierre detectada → tras despedirse, reciclamos a Haiku.
-            if await _handle_ask(websocket, jarvis, prompt):
+            # Frase de cierre detectada → tras despedirse, reciclamos a Haiku,
+            # salvo que la conversación gestione agentes vivos (Fase 4: se perdería
+            # el contexto del gestor). El botón "nueva conversación" recicla siempre.
+            closing = await _handle_ask(websocket, jarvis, prompt)
+            if any(t.startswith("mcp__agents__") for t in jarvis.last_tools_used):
+                managing_agents = True
+            if closing and not (managing_agents and await agents.has_active()):
                 await reset_core("ended")
     except WebSocketDisconnect:
         # Desconexión normal del cliente: no es un error.

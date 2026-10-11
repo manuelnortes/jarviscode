@@ -37,7 +37,9 @@ from claude_agent_sdk import (
 
 from src.core.routing import (
     MODEL_HAIKU,
+    MODEL_OPUS,
     MODEL_PRIORITY,
+    MODEL_SONNET,
     classify_model,
     parse_model_prefix,
 )
@@ -99,7 +101,7 @@ _CAPABILITY_PROMPTS = {
         "- Reproducción de Spotify (spotify_play por búsqueda o URI, pausar, siguiente, volumen, qué suena): el dispositivo por defecto es \"Salón\". Spotify SOLO funciona si ya hay un dispositivo activo en Spotify Connect; no despierta un altavoz en reposo. Por eso, para poner música ambiente en el salón usa YouTube (youtube_play); reserva Spotify para controlar una sesión de Spotify que ya esté activa, y Google Cast para reproducir una URL de audio concreta."
     ),
     "notify": (
-        "- Notificación push al móvil de {user} (notify_user): para avisarle de algo o confirmarle el final de una tarea. No la uses para responder dentro de la conversación; solo cuando proceda un aviso al móvil."
+        "- Notificación push al móvil de {user} (notify_user): para avisarle de algo o confirmarle el final de una tarea que hayas hecho tú (no la de un agente en segundo plano: esos avisos los manda el sistema). No la uses para responder dentro de la conversación; solo cuando proceda un aviso al móvil."
     ),
     "reminders": (
         "- Recordatorios y temporizadores (set_reminder, list_reminders, cancel_reminder): programa avisos a futuro que llegan al móvil de {user} cuando vencen. Calcula el momento a partir de la hora actual que recibes en la etiqueta [ahora ...]."
@@ -111,9 +113,15 @@ _CAPABILITY_PROMPTS = {
         "- Proyectos de desarrollo de {user} (herramientas mcp__workspace__*): estado de un proyecto (\"¿en qué me quedé con X?\" → project_status, resúmelo en dos o tres frases), tareas pendientes (todo_list), qué se ha hecho últimamente (recent_activity) y si hay algo sin subir (unpushed). No puedes commitear ni subir nada: de lo pendiente solo informas. Notas: cuando {user} diga \"apunta…\" o \"anota…\", usa note_add sin pedir confirmación y repite brevemente lo apuntado; si a continuación lo corrige, usa note_edit con el id que devolvió note_add (si no lo tienes, búscalo con todo_list); si pide quitarla, note_delete. Solo puedes escribir notas en ese Inbox; no ofrezcas editar planes ni código."
     ),
     "agents": (
-        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user}. Dos modos: mode='read' para revisar, investigar o proponer, y mode='code' cuando {user} pide cambiar, arreglar o implementar algo: el agente trabaja en una rama propia, pasa los tests y deja un PR que {user} revisa; nunca se fusiona nada solo. Redacta la tarea de forma completa (el agente no ve esta conversación). Tras agent_start di brevemente que el agente está en marcha y que le avisarás al móvil cuando termine; no esperes al resultado. Para \"¿cómo van?\" usa agent_status; para contar lo que hizo o su PR, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno en idle o done, agent_message; para pararlo, agent_cancel. Si un agente pregunta y espera al gestor (eres tú): respóndele con agent_message si lo puedes deducir de lo que sabes; si es una decisión de {user} (diseño, gustos, prioridades), pregúntaselo o usa agent_escalate. Si recibes una etiqueta [avisos de agentes …], cuéntaselo a {user} brevemente al principio de tu respuesta. Refiérete a cada agente por su repositorio y su tarea, no por el id."
+        "- Agentes en segundo plano (herramientas mcp__agents__*): encargas tareas largas a agentes de Claude que trabajan solos sobre un repositorio de {user}. Dos modos: mode='read' para revisar, investigar o proponer, y mode='code' cuando {user} pide cambiar, arreglar o implementar algo: el agente trabaja en una rama propia, pasa los tests y deja un PR que {user} revisa; nunca se fusiona nada solo. Antes de delegar en un proyecto, lee su PLAN.md con project_file (sobre todo el punto de retomada y las decisiones que afectan al encargo); para saber a qué repositorio se refiere {user}, project_list. Redacta cada encargo con la plantilla de agent_start (qué hacer, alcance, contexto con las decisiones del plan citadas, criterio de hecho, qué no tocar): el agente no ve esta conversación. Si varios encargos van a la vez, que sean independientes entre sí; los que dependen de otro PR van después de que se fusione. Cuando {user} diga \"vamos con X\" o nombre un proyecto para trabajar en él: búscalo con project_list, lee su plan y estado, y PROPÓNLE qué encargos lanzarías y a cuántos agentes; no lances nada hasta que diga que sí. Tras agent_start di brevemente que el agente está en marcha y que el sistema le avisará al móvil cuando termine; no esperes al resultado. Nunca avises tú de que un agente ha terminado (ni con notify_user ni en la conversación) salvo que agent_status o agent_result lo confirmen: el aviso de fin lo manda el sistema solo. Para \"¿cómo van?\" usa agent_status: cuenta primero los que trabajan o acaban de terminar y luego los que esperan algo de {user}; no menciones los antiguos (ni cuántos hay) salvo que {user} pregunte por los anteriores, y entonces usa include_old=true; para contar lo que hizo o su PR, agent_result y resúmelo en pocas frases; para añadirle instrucciones o seguir con uno en idle o done, agent_message; para pararlo, agent_cancel. Para fusionar un PR, pr_merge en dos pasos: primero sin confirm, le resumes el PR a {user} y le preguntas; solo con un sí explícito suyo, pr_merge con confirm=true. Nunca fusiones por iniciativa propia. {user} también puede revisar y fusionar los PR desde el botón PRs de la web. Tu memoria de esta conversación se pierde al cerrarla; la bitácora del agente no: cada vez que {user} decida o aclare algo sobre un encargo (alcance, criterio, preferencia, cambio de plan), apúntalo con agent_note. Antes de dar por bueno el PR de un agente de código, mándale con agent_message su bitácora para que incorpore lo relevante al PLAN.md del proyecto en su rama (así {user} lo revisa en el diff). Los agentes de código trabajan sobre la rama de integración (develop), nunca sobre la principal: Vision revisa sus PR contra el plan y fusiona en develop los alineados con tests en verde; {user} aprueba al final un único PR develop → principal. Si llegan al límite de uso, los agentes guardan su trabajo y quedan en pausa (paused): cuando {user} diga \"retoma\" o \"retoma todos\", retómalos con agent_message (uno por agente en pausa). Las preguntas de los agentes las atiende primero Vision, el gestor autónomo (otra sesión, en segundo plano): responde lo que el plan deja claro o es de coordinación y pasa a {user} lo demás; agent_status te dice qué ha hecho Vision desde la última vez: cuéntaselo a {user} brevemente. Si aun así un agente pregunta y espera al gestor: lee antes su detalle con agent_result (encargo, bitácora y handoff), no contestes de memoria; respóndele con agent_message si lo puedes deducir de eso; si es una decisión de {user} (diseño, gustos, prioridades), pregúntaselo o usa agent_escalate. Si recibes una etiqueta [avisos de agentes …], cuéntaselo a {user} brevemente al principio de tu respuesta. Refiérete a cada agente por su repositorio y su tarea, no por el id."
     ),
 }
+
+# Capacidad de agentes con Vision activa (Hito 9, Fase 5): Vision es el único
+# gestor y Jarvis solo hace de puente. Las reglas de encargo viven solo en Vision.
+_AGENTS_BRIDGE_PROMPT = (
+    "- Agentes en segundo plano: agentes de Claude que programan solos sobre los repositorios de {user}, gestionados por Vision, el gestor de los agentes (otra sesión, en segundo plano). Tú NO gestionas agentes: haces de puente. Todo lo que sea ACTUAR (encargar algo, lanzar el siguiente punto, responder a un agente, retomar los pausados, cancelar, fusionar un PR) o hablar con Vision va con la herramienta vision, pasándole la frase de {user} LITERAL, tal cual la dijo (no la resumas, no la reescribas, no redactes encargos: lo hace Vision). Luego cuéntale a {user} la respuesta de Vision brevemente, sin añadir nada que no diga. Para consultas (\"¿cómo van los agentes?\", \"¿qué hizo X?\") NO despiertes a Vision: usa agent_status (cuenta primero los que trabajan o acaban de terminar, luego los que esperan algo de {user}, y lo que ha hecho Vision; no menciones los antiguos salvo que pregunte por los anteriores, y entonces include_old=true) y agent_result para el detalle de uno, resumido en pocas frases; project_list y project_file para mirar el plan de un proyecto. Nunca avises tú de que un agente ha terminado salvo que agent_status lo confirme: el aviso lo manda el sistema. {user} también puede revisar y fusionar los PR desde el botón PRs de la web. Si recibes una etiqueta [avisos de agentes …], cuéntaselo a {user} brevemente al principio de tu respuesta. Refiérete a cada agente por su repositorio y su tarea, no por el id."
+)
 
 # Nombre con el que Jarvis se dirige a su usuario. Configurable para no dejar
 # un nombre propio fijo en el código (se sustituye con replace y no con format
@@ -174,6 +182,11 @@ def build_system_prompt(capabilities: list[str]) -> str:
     # Workspace sin remoto de notas es solo lectura: que no prometa apuntar nada.
     if not os.getenv("JARVIS_NOTES_REMOTE", "").strip():
         texts["workspace"] = texts["workspace"].split(" Notas:")[0]
+    if "agents" in capabilities:
+        from src.capabilities.agents import bridge_mode
+
+        if bridge_mode():
+            texts["agents"] = _AGENTS_BRIDGE_PROMPT
     # Sin notificaciones no hay aviso al móvil: que no lo prometa.
     if "notify" not in capabilities:
         texts["agents"] = texts["agents"].replace(
@@ -332,12 +345,12 @@ class JarvisCore:
 
         if "agents" in caps:
             from src.capabilities.agents import (
-                AGENT_TOOL_NAMES,
                 SERVER_NAME as AGENTS_SERVER,
+                agent_tool_names,
                 build_agents_server,
             )
             self._pending_mcp[AGENTS_SERVER] = build_agents_server()
-            self._pending_tools.extend(AGENT_TOOL_NAMES)
+            self._pending_tools.extend(agent_tool_names())
 
         if "homeassistant" in caps:
             # Home Assistant es un servidor MCP REMOTO (SSE), a diferencia del
@@ -451,17 +464,34 @@ class JarvisCore:
 
         prefix_model, clean_prompt = parse_model_prefix(prompt)
 
+        # Sin ntfy, los avisos de los agentes llegan "a través del gestor" (D10):
+        # una etiqueta más con lo nuevo desde el último turno. Se leen antes de
+        # elegir modelo: un turno con avisos es trabajo de gestor → Opus (Fase 4, "B"),
+        # o Sonnet si Vision gestiona y Jarvis solo hace de puente (Fase 5).
+        notices: list[str] = []
+        manager_model = MODEL_OPUS
+        if "agents" in self.capabilities:
+            from src.capabilities.agents import bridge_mode, pending_notices
+
+            if bridge_mode():
+                manager_model = MODEL_SONNET
+            if "notify" not in self.capabilities:
+                notices = await pending_notices(self._agent_notices_seen)
+
+        def route() -> str:
+            return manager_model if notices else classify_model(clean_prompt, manager_model)
+
         if self._client is None:
             # Primer turno: elegir modelo y conectar.
             if prefix_model:
                 self.config.model = prefix_model
             elif self.config.model is None and self.config.model_routing:
-                self.config.model = classify_model(clean_prompt)
+                self.config.model = route()
             await self._connect()
         else:
             # Turnos siguientes: comprobar si hace falta ratchet-up.
             needed = prefix_model or (
-                classify_model(clean_prompt) if self.config.model_routing else self.current_model
+                route() if self.config.model_routing else self.current_model
             )
             current_prio = MODEL_PRIORITY.get(self.current_model or "", 0)
             needed_prio  = MODEL_PRIORITY.get(needed or "", 0)
@@ -486,14 +516,8 @@ class JarvisCore:
         # modo que los front-ends nunca ven la hora inyectada y no se duplica con
         # el badge de hora que la UI web ya pinta en el navegador.
         augmented_prompt = f"{clean_prompt}\n\n[ahora {datetime.now():%d/%m/%Y %H:%M}]"
-        # Sin ntfy, los avisos de los agentes llegan "a través del gestor" (D10):
-        # una etiqueta más con lo nuevo desde el último turno.
-        if "agents" in self.capabilities and "notify" not in self.capabilities:
-            from src.capabilities.agents import pending_notices
-
-            notices = await pending_notices(self._agent_notices_seen)
-            if notices:
-                augmented_prompt += "\n[avisos de agentes: " + " | ".join(notices) + "]"
+        if notices:
+            augmented_prompt += "\n[avisos de agentes: " + " | ".join(notices) + "]"
         await self._client.query(augmented_prompt)
         async for message in self._client.receive_response():
             if isinstance(message, AssistantMessage):

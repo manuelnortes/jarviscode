@@ -1,10 +1,16 @@
 """Capacidad de agentes: la conversación gestiona agentes de Claude en segundo plano.
 
-Jarvis (el "gestor") encarga tareas a agentes que corren en el contenedor
-``jarvis-worker`` y los vigila: estado, resultado, mensajes de seguimiento y
-cancelación. Aquí solo hay un cliente HTTP fino: la cola, las sesiones y los
-estados viven en el worker (``src/worker/``), así sobreviven a que la
-conversación se cierre o se recicle.
+Los agentes corren en el contenedor ``jarvis-worker``. Aquí solo hay un cliente
+HTTP fino: la cola, las sesiones y los estados viven en el worker
+(``src/worker/``), así sobreviven a que la conversación se cierre o se recicle.
+
+Dos modos de la conversación (Hito 9, Fase 5):
+  - **Puente** (con Vision activa): Vision es el único gestor. Jarvis solo tiene
+    ``vision`` (reenvía la frase literal del usuario y lee la respuesta) y las de
+    solo lectura (``agent_status``, ``agent_result``, ficheros de proyecto) para
+    contestar "¿cómo van?" sin despertar a Vision (Opus).
+  - **Gestor** (``JARVIS_VISION=0``): Jarvis encarga, sigue, cancela y fusiona
+    él mismo, como antes de la Fase 5.
 
 Además expone helpers para el núcleo:
   - ``has_active()``: si hay agentes vivos (para el TTL largo de la conversación).
@@ -28,20 +34,26 @@ import time
 import httpx
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from src.capabilities.project_files import TOOLS as PROJECT_TOOLS
+
 log = logging.getLogger("jarvis.agents")
 
 _TIMEOUT = 15.0
 # Estados en los que el agente sigue vivo (mismo criterio que el worker).
-ACTIVE_STATES = ("queued", "working", "waiting_input", "idle", "rate_limited")
+ACTIVE_STATES = ("queued", "working", "waiting_input", "idle", "rate_limited", "paused")
 # Cambios de estado que merecen un aviso al móvil.
 _NOTIFY_STATES = {
     "idle": "ha terminado",
     "failed": "ha fallado",
     "rate_limited": "ha llegado al límite de uso y queda en pausa",
+    "paused": "ha llegado al límite de uso: trabajo guardado y en pausa",
 }
 # Texto del aviso del ciclo del idle (D10). Los minutos son los reales: los
 # umbrales del worker (35/45/55 por defecto) son configurables.
 _IDLE_TEXT = "lleva {mins} min sin trabajo: pronto documentará su estado y cerrará la sesión (se podrá retomar)"
+# Ventana en la que un agente cerrado sin nada pendiente sigue siendo relevante
+# para "¿cómo van los agentes?" (s). Pasada, solo sale si el usuario pide los anteriores.
+_RECENT_WINDOW = 24 * 3600
 # Cada cuánto sondea el núcleo al worker (s).
 _WATCH_INTERVAL = 15.0
 
@@ -89,6 +101,67 @@ async def list_agents() -> list[dict]:
     return await _call("GET", "/agents")
 
 
+async def get_agent(agent_id: str) -> dict:
+    """Un agente por id."""
+    return await _call("GET", f"/agents/{agent_id}")
+
+
+async def merge_check(agent_id: str) -> dict:
+    """El agente, si su PR se puede fusionar ahora (si no, RuntimeError con el motivo)."""
+    return await _call("GET", f"/agents/{agent_id}/merge-check")
+
+
+async def mark_merged(agent_id: str, shas: dict) -> dict:
+    """Avisa al worker de que el núcleo ha fusionado el PR del agente."""
+    return await _call("POST", f"/agents/{agent_id}/merged", json=shas)
+
+
+async def mark_closed(agent_id: str) -> dict:
+    """Cierra en el worker el PR del agente sin fusionar."""
+    return await _call("POST", f"/agents/{agent_id}/closed")
+
+
+def _relevant(agents: list[dict], now: float | None = None) -> tuple[list[dict], list[dict]]:
+    """Separa los agentes que importan ahora de los antiguos (Fase 4).
+
+    Relevantes: los vivos, los que esperan algo del usuario aunque sean viejos (PR
+    abierto sin fusionar, fallo sin revisar) y los cerrados en las últimas 24 h. Los
+    cancelados nunca: los canceló el usuario, o dio por revisado el fallo. El resto no se
+    menciona salvo que el usuario pregunte por los anteriores: oír cada vez la lista
+    de agentes de hace días no aporta nada.
+
+    Returns:
+        (relevantes ordenados: vivos → recién terminados → pendientes viejos, antiguos)
+    """
+    now = time.time() if now is None else now
+    relevant, old = [], []
+    for agent in agents:
+        recent = now - (agent.get("updated_at") or 0) < _RECENT_WINDOW
+        if agent.get("state") == "cancelled":
+            old.append(agent)
+        elif agent.get("state") in ACTIVE_STATES:
+            relevant.append((0, agent))
+        elif recent:
+            relevant.append((1, agent))
+        elif agent.get("pr_status") == "open" or agent.get("state") == "failed":
+            relevant.append((2, agent))
+        else:
+            old.append(agent)
+    # Dentro de cada grupo, lo más reciente primero.
+    relevant.sort(key=lambda g: (g[0], -(g[1].get("updated_at") or 0)))
+    return [a for _, a in relevant], old
+
+
+def _ago(ts: float) -> str:
+    """'hace N min / h / días' legible para el modelo."""
+    secs = max(0, time.time() - ts)
+    if secs < 3600:
+        return f"hace {int(secs // 60)} min"
+    if secs < 2 * 86400:
+        return f"hace {int(secs // 3600)} h"
+    return f"hace {int(secs // 86400)} días"
+
+
 def _describe(agent: dict, with_result: bool = False) -> str:
     """Una línea (o un bloque, con resultado) legible para el modelo."""
     extra = ""
@@ -97,6 +170,9 @@ def _describe(agent: dict, with_result: bool = False) -> str:
         extra = f", pregunta y espera a {who}: {agent.get('question') or ''}"
     if agent.get("state") == "idle" and agent.get("idle_since"):
         extra += f", en idle desde hace {int((time.time() - agent['idle_since']) // 60)} min"
+    wait = _waits().get(agent["id"])
+    if wait:
+        extra += f", espera a que se fusione el trabajo del agente {wait['blocked_by']} ({wait.get('reason', '')})"
     if agent.get("pr_status"):
         tests = {1: "tests OK", 0: "tests FALLAN"}.get(agent.get("pr_tests_passed"), "tests sin informar")
         extra += f", PR {agent['pr_status']} en la rama {agent.get('branch')} ({tests})"
@@ -105,6 +181,13 @@ def _describe(agent: dict, with_result: bool = False) -> str:
     mode = "código" if agent.get("mode") == "code" else "lectura"
     line = f"[{agent['id']}] {agent['repo']} · {mode} · {agent['state']}{extra} · tarea: {agent['task'][:160]}"
     if with_result:
+        # El detalle lleva el encargo entero y la bitácora: con eso (y el handoff)
+        # el gestor responde al agente sin depender de la memoria de la conversación.
+        if len(agent["task"]) > 160:
+            line += f"\nEncargo completo:\n{agent['task']}"
+        if agent.get("manager_notes"):
+            merged = " (ya volcada al PLAN.md en el PR fusionado)" if agent.get("notes_merged") else ""
+            line += f"\nBitácora del gestor{merged}:\n{agent['manager_notes']}"
         if agent.get("result"):
             line += f"\nResultado:\n{agent['result']}"
         if agent.get("pr_status"):
@@ -122,13 +205,51 @@ async def _usage_line() -> str:
     except (httpx.HTTPError, RuntimeError):
         return "Uso de la suscripción: desconocido."
     windows = usage.get("windows") or {}
+    if usage.get("unknown"):
+        return ("Uso de la suscripción: DESCONOCIDO (la sonda de uso falla): por seguridad no se "
+                "pueden lanzar ni continuar agentes.")
     if not windows:
         return "Uso de la suscripción: aún sin datos."
-    parts = [f"{name} {(w.get('utilization') or 0) * 100:.0f} %" for name, w in windows.items()]
-    line = f"Uso de la suscripción: {', '.join(parts)} (límite de agentes {usage['limit'] * 100:.0f} %)"
+    # "ventana de 5 horas" y no "5 h" a secas: Jarvis lo leía como "límite diario".
+    labels = {"five_hour": "ventana de 5 horas", "seven_day": "semanal (7 días)"}
+    # "limits" por ventana desde la tarea (d); "limit" (uno solo) en workers antiguos.
+    limits = usage.get("limits") or {}
+    parts = []
+    for name, w in windows.items():
+        limit = limits.get(name, usage["limit"])
+        parts.append(f"{labels.get(name, name)} {(w.get('utilization') or 0) * 100:.0f} % "
+                     f"(límite {limit * 100:.0f} %)")
+    line = f"Uso de la suscripción: {', '.join(parts)}"
     if usage.get("blocked"):
         line += ": BLOQUEADO, no se pueden lanzar ni continuar agentes hasta que se reinicie la ventana"
     return line + "."
+
+
+def _vision_lines() -> list[str]:
+    """Lo que ha hecho Vision desde la última vez que se contó (y lo marca como contado)."""
+    from src.vision.session import pop_unreported
+
+    try:
+        done = pop_unreported()
+    except (OSError, ValueError):
+        return []
+    if not done:
+        return []
+    lines = ["Vision (el gestor autónomo) desde la última consulta:"]
+    for e in done:
+        who = f", agente {e['agent']}" if e["agent"] != "-" else ""  # las propuestas no tienen agente
+        lines.append(f"- {e['repo']}{who}: {e.get('what', '')[:200]} → {e['verdict']}")
+    return lines
+
+
+def _waits() -> dict[str, dict]:
+    """Esperas entre agentes apuntadas por Vision (vision_wait)."""
+    from src.vision.session import load_waits
+
+    try:
+        return load_waits()
+    except (OSError, ValueError):
+        return {}
 
 
 def _text(message: str) -> dict:
@@ -141,7 +262,39 @@ async def _run(coro) -> dict:
     try:
         return _text(await coro)
     except (httpx.HTTPError, RuntimeError) as exc:
-        return _text(f"Error del worker de agentes: {exc}")
+        return _text(f"Error con los agentes: {exc}")
+
+
+# Reglas de encargo: viven SOLO aquí y las usan agent_start (Jarvis) y vision_start
+# (Vision), para que lo que se añada llegue a los dos a la vez (tarea (g) del Hito 9).
+TASK_RULES = (
+    "UN SOLO punto por encargo: si hay varias cosas que hacer, lanza un agente por cada una (se "
+    "encolan y arrancan cuando hay hueco); nunca 'X + Y + Z' en el mismo encargo. Los que dependan "
+    "del PR de otro, después de que se fusione. "
+    "El encargo, completo y autocontenido (el agente no ve la conversación), con estas "
+    "secciones: QUÉ HACER · ALCANCE (qué entra y qué no) · CONTEXTO (ficheros relevantes y "
+    "las decisiones del plan que aplican, citadas: 'D3', '§Fase 2'…) · HECHO CUANDO "
+    "(criterio comprobable, tests incluidos) · NO TOCAR. Empieza pidiéndole que lea el "
+    "PLAN.md del proyecto. Si la tarea consume una API, da los nombres reales de los campos "
+    "o una respuesta real de ejemplo (para los tests); las variables de entorno, con su "
+    "nombre exacto del .env.example."
+)
+
+
+async def start_agent(repo: str, task: str, mode: str = "read") -> tuple[dict, str]:
+    """Lanza un agente en el worker (lo usan agent_start y vision_start).
+
+    Returns:
+        (el agente creado, aviso de la puesta al día de la rama de integración o '')
+    """
+    from src.capabilities import prs
+
+    sync = ""
+    if mode == "code":
+        # El trabajo autónomo parte de la rama de integración (develop), al día con la principal.
+        sync = await prs.ensure_integration(repo)
+    agent = await _call("POST", "/agents", json={"repo": repo, "task": task, "mode": mode})
+    return agent, sync
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +311,7 @@ async def _run(coro) -> dict:
         "type": "object",
         "properties": {
             "repo": {"type": "string", "description": "Nombre del repositorio, p. ej. 'agent-sandbox'."},
-            "task": {"type": "string", "description": "La tarea, redactada de forma completa y autocontenida."},
+            "task": {"type": "string", "description": TASK_RULES},
             "mode": {"type": "string", "enum": ["read", "code"], "description": "Por defecto 'read'."},
         },
         "required": ["repo", "task"],
@@ -166,37 +319,60 @@ async def _run(coro) -> dict:
 )
 async def agent_start(args: dict) -> dict:
     async def go() -> str:
-        body = {"repo": args["repo"], "task": args["task"], "mode": args.get("mode") or "read"}
-        agent = await _call("POST", "/agents", json=body)
+        agent, sync = await start_agent(args["repo"], args["task"], args.get("mode") or "read")
         branch = f", rama {agent['branch']}" if agent.get("branch") else ""
-        return f"Agente {agent['id']} creado ({agent['state']}{branch})."
+        return f"Agente {agent['id']} creado ({agent['state']}{branch}). {sync}".strip()
 
     return await _run(go())
 
 
 @tool(
     "agent_status",
-    "Estado de los agentes: sin id, los recientes; con id, uno concreto. Estados: queued (en cola), "
+    "Estado de los agentes: sin id, solo los relevantes (vivos, con algo pendiente del usuario o "
+    "terminados en las últimas 24 h); con include_old=true, también los anteriores (solo si el "
+    "usuario los pide explícitamente); con id, uno concreto. Estados: queued (en cola), "
     "working, waiting_input (ha preguntado algo), idle (terminó; sesión viva para seguir), "
-    "rate_limited (pausado por límite de uso), done (sesión cerrada; se puede retomar en frío con "
+    "paused (en pausa por el límite de uso, con su trabajo guardado; se retoma con agent_message), "
+    "rate_limited (pausado por límite de uso, estado antiguo), done (sesión cerrada; se puede retomar en frío con "
     "agent_message), merged, failed, cancelled.",
-    {"type": "object", "properties": {"id": {"type": "string"}}},
+    {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "include_old": {"type": "boolean", "description": "Incluir los antiguos. Por defecto false."},
+        },
+    },
 )
 async def agent_status(args: dict) -> dict:
     async def go() -> str:
         if args.get("id"):
             return _describe(await _call("GET", f"/agents/{args['id']}"))
-        agents = (await _call("GET", "/agents"))[:10]
-        lines = [_describe(a) for a in agents] or ["No hay agentes."]
-        return "\n".join(lines + [await _usage_line()])
+        agents = await _call("GET", "/agents")
+        if not agents:
+            return "No hay agentes.\n" + await _usage_line()
+        relevant, old = _relevant(agents)
+        if args.get("include_old"):
+            lines = [_describe(a) for a in relevant]
+            lines += ["Anteriores (ya cerrados, sin nada pendiente):"] + [_describe(a) for a in old[:10]]
+        elif relevant:
+            lines = [_describe(a) for a in relevant]
+            if old:
+                # Para que el modelo sepa que existen, no para leerlo en voz alta.
+                lines.append(f"(Hay {len(old)} agentes antiguos ocultos: no los menciones salvo que te pregunten por ellos.)")
+        else:
+            last = max(old, key=lambda a: a.get("updated_at") or 0)
+            lines = [f"Ningún agente en marcha ni pendiente. El último terminó {_ago(last.get('updated_at') or 0)} "
+                     "(dilo en una sola frase, sin enumerar los antiguos)."]
+        return "\n".join(lines + _vision_lines() + [await _usage_line()])
 
     return await _run(go())
 
 
 @tool(
     "agent_result",
-    "Resultado del último turno de un agente, con su PR (título, descripción, cambios, tests) y su "
-    "handoff si lo tiene. Resúmelo en voz en pocas frases.",
+    "Detalle de un agente: encargo completo, bitácora del gestor (decisiones ya tomadas con el "
+    "usuario), resultado del último turno, su PR (título, descripción, cambios, tests) y su handoff "
+    "si lo tiene. Para contarlo, resúmelo en voz en pocas frases.",
     {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
 )
 async def agent_result(args: dict) -> dict:
@@ -226,6 +402,26 @@ async def agent_message(args: dict) -> dict:
 
 
 @tool(
+    "agent_note",
+    "Apunta en la bitácora del agente una decisión o criterio del usuario sobre su encargo (alcance, "
+    "preferencias, respuestas, cambios de plan). Sobrevive a que esta conversación se cierre: es lo "
+    "que permite responder al agente más adelante sin contestar a ciegas. Las respuestas a sus "
+    "preguntas con agent_message se apuntan solas.",
+    {
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "note": {"type": "string"}},
+        "required": ["id", "note"],
+    },
+)
+async def agent_note(args: dict) -> dict:
+    async def go() -> str:
+        agent = await _call("POST", f"/agents/{args['id']}/note", json={"text": args["note"]})
+        return f"Apuntado en la bitácora del agente {agent['id']}."
+
+    return await _run(go())
+
+
+@tool(
     "agent_escalate",
     "Pasa al usuario la pregunta pendiente de un agente cuando es una decisión suya (de diseño, de "
     "gusto o de prioridades) y no la puedes responder tú con lo que sabes.",
@@ -241,7 +437,8 @@ async def agent_escalate(args: dict) -> dict:
 
 @tool(
     "agent_cancel",
-    "Cancela un agente.",
+    "Cancela un agente. Sobre uno que ha fallado (failed), lo da por revisado: deja de salir en "
+    "agent_status.",
     {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
 )
 async def agent_cancel(args: dict) -> dict:
@@ -252,16 +449,84 @@ async def agent_cancel(args: dict) -> dict:
     return await _run(go())
 
 
-_TOOLS = [agent_start, agent_status, agent_result, agent_message, agent_escalate, agent_cancel]
+@tool(
+    "pr_merge",
+    "Fusiona el PR de un agente en su rama base y borra la rama (el merge guarda todo para un "
+    "rollback). Dos pasos obligatorios: llámala primero SIN confirm para obtener el resumen, léeselo "
+    "al usuario (avisa si los tests fallan) y pregúntale si fusiona; solo si responde que sí de forma "
+    "explícita a ESA pregunta, llámala con confirm=true. Nunca con confirm=true por iniciativa propia.",
+    {
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "confirm": {"type": "boolean"}},
+        "required": ["id"],
+    },
+)
+async def pr_merge(args: dict) -> dict:
+    from src.capabilities import prs
+
+    async def go() -> str:
+        if not args.get("confirm"):
+            agent = await merge_check(args["id"])
+            return prs.summary(agent) + "\nPide confirmación explícita al usuario antes de fusionar."
+        agent = await prs.merge(args["id"])
+        note = "" if agent["branch_deleted"] else " (la rama no se pudo borrar; no afecta a la fusión)"
+        return (f"PR fusionado en {agent['repo']}/{agent['base_branch']}{note}. "
+                f"Commit {agent['pr_merge_sha'][:10]}; rollback posible.")
+
+    return await _run(go())
+
+
+@tool(
+    "vision",
+    "Habla con Vision, el gestor de los agentes: todo lo que sea ACTUAR sobre agentes o PRs (encargar, "
+    "lanzar el siguiente punto, responder a un agente, retomar, cancelar, fusionar) y lo que el usuario "
+    "quiera decirle o preguntarle a Vision. text = la frase del usuario LITERAL, tal cual la dijo (sin "
+    "resumir ni reescribir: Vision decide). Devuelve la respuesta de Vision; puede tardar un rato.",
+    {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+)
+async def vision_tool(args: dict) -> dict:
+    from src.vision import session
+
+    vision = session.current()
+    if vision is None:
+        return _text("Vision no está activa (solo vive en el servidor del núcleo): no puedo actuar sobre los agentes.")
+    try:
+        return _text("Vision responde:\n" + await vision.message(args["text"]))
+    except RuntimeError as exc:
+        return _text(str(exc))
+
+
+# Puente (Vision activa): una herramienta de acción y las de lectura.
+_BRIDGE_TOOLS = [vision_tool, agent_status, agent_result, *PROJECT_TOOLS]
+# Gestor (Vision apagada): Jarvis lo hace todo, como antes de la Fase 5.
+_MANAGER_TOOLS = [
+    agent_start, agent_status, agent_result, agent_message, agent_note, agent_escalate, agent_cancel,
+    pr_merge, *PROJECT_TOOLS,
+]
 
 # Nombre del servidor MCP. Las herramientas quedan como mcp__agents__<tool>.
 SERVER_NAME = "agents"
-AGENT_TOOL_NAMES = [f"mcp__{SERVER_NAME}__{t.name}" for t in _TOOLS]
+
+
+def bridge_mode() -> bool:
+    """True si Vision gestiona los agentes y Jarvis solo hace de puente."""
+    from src.vision.session import is_enabled as vision_enabled
+
+    return vision_enabled()
+
+
+def _tools() -> list:
+    return _BRIDGE_TOOLS if bridge_mode() else _MANAGER_TOOLS
+
+
+def agent_tool_names() -> list[str]:
+    """Nombres MCP de las herramientas de agentes de la conversación (según el modo)."""
+    return [f"mcp__{SERVER_NAME}__{t.name}" for t in _tools()]
 
 
 def build_agents_server():
-    """Crea el servidor MCP en proceso con las herramientas de agentes."""
-    return create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=_TOOLS)
+    """Crea el servidor MCP en proceso con las herramientas de agentes (según el modo)."""
+    return create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=_tools())
 
 
 # --------------------------------------------------------------------------- #
@@ -299,9 +564,15 @@ async def pending_notices(seen: set[str]) -> list[str]:
         agents = await _call("GET", "/agents", params={"active": 1})
     except (httpx.HTTPError, RuntimeError):
         return []
+    from src.vision.session import is_enabled as vision_enabled
+
+    # Con Vision activa, las preguntas al gestor las atiende ella, no la conversación.
+    skip_mgr = vision_enabled()
     fresh = []
     for agent in agents:
         for key, text in _notices(agent):
+            if skip_mgr and ":askmgr:" in key:
+                continue
             if key not in seen:
                 seen.add(key)
                 fresh.append(text)

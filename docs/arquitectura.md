@@ -124,7 +124,8 @@ pronuncia bien y RVC aplica el timbre encima, en la GPU. Sin GPU, se degrada a P
 | Recordatorios | APScheduler + SQLite, arrancado en el lifespan de FastAPI; persisten a reinicios y se entregan por ntfy |
 | Domótica | Servidor MCP de Home Assistant (SSE + token de larga duración) por la LAN; HA solo expone las luces |
 | Workspace | Herramientas propias (una llamada por pregunta hablada) sobre la carpeta de proyectos en solo lectura y los bare repos; las notas van a un Inbox de un `TODO.md` versionado, con commit y push por cambio |
-| Agentes | Cliente HTTP del contenedor `jarvis-worker` (aparte, sin root, con token), que ejecuta una cola de sesiones del Claude Agent SDK sobre un clon por agente; el núcleo lo sondea y avisa de los cambios de estado por ntfy (o en tu siguiente turno). Modo lectura o código: los de código trabajan en ramas `agent/*` (un hook `pre-receive` por UID bloquea lo demás) y dejan PR ligeros; ciclo del idle con handoff dentro de la hora de caché de prompt |
+| Agentes | Cliente HTTP del contenedor `jarvis-worker` (aparte, sin root, con token), que ejecuta una cola de sesiones del Claude Agent SDK sobre un clon por agente; el núcleo lo sondea y avisa de los cambios de estado por ntfy (o en tu siguiente turno). Modo lectura o código: los de código trabajan en ramas `agent/*` (un hook `pre-receive` por UID bloquea lo demás) y dejan PR ligeros, saliendo de una rama de integración (`develop`); ciclo del idle con handoff dentro de la hora de caché de prompt; uso real leído con una sonda de 1 token, pausa con handoff al llegar al límite y puntos de control cada +5 % de la ventana; métricas por turno |
+| Vision | Sesión larga de Opus dentro del núcleo que se despierta por eventos (sondea el worker por HTTP plano; sin tokens mientras está inactivo): responde a las preguntas de los agentes según el plan, revisa los PR y los fusiona en `develop`, lanza el siguiente punto del plan y desbloquea a los agentes que esperan el PR de otro. Handoff por proyecto a los 45 min inactivo, reciclado al pasar de ~100.000 tokens de contexto. Jarvis solo hace de puente (herramienta `vision`) y `POST /vision/message` permite hablarle sin voz. Ver [vision.es.md](vision.es.md) |
 
 Las capacidades se activan con `JARVIS_CAPABILITIES` y se apagan solas si les falta configuración; el system prompt solo describe las activas.
 
@@ -136,6 +137,7 @@ La fecha y hora actuales se inyectan en cada turno para que el modelo calcule re
 - Credenciales (Claude, ntfy, Spotify, HA) solo en `.env`, nunca en el código.
 - UI web tras proxy inverso con SSO; el puerto del núcleo solo en la LAN.
 - Home Assistant expone a Jarvis únicamente las entidades necesarias.
+- Agentes: contenedor aparte sin los secretos del núcleo; su usuario de git solo puede empujar `agent/*` (hook `pre-receive`). Vision solo puede fusionar en la rama de integración y con los tests en verde (`merge_guard`, en el código); fusionar o cerrar en tu nombre, solo durante el turno de un mensaje tuyo. La rama principal es siempre tuya.
 
 ## 10. Hoja de ruta
 
@@ -150,6 +152,8 @@ La fecha y hora actuales se inyectan en cada turno para que el modelo calcule re
 | 6 — Capacidades (ntfy, recordatorios, Spotify, YouTube) | ✅ |
 | 7 — Domótica (Home Assistant) | ✅ desplegado |
 | 5 — Acelerador GPU + voces de personaje | 📋 planificado |
+| 8 — Workspace por voz (proyectos, TODO, notas) | ✅ desplegado |
+| 9 — Agentes que programan + Vision (gestor autónomo) | ✅ desplegado; pendiente: Vision como servicio aparte |
 | Futuro — satélites por la casa, Telegram, calendario, correo | 📋 |
 
 ## 11. Referencias

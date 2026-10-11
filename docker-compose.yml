@@ -138,12 +138,35 @@ services:
       JARVIS_AGENT_IDLE_WARN: ${JARVIS_AGENT_IDLE_WARN:-2100}
       JARVIS_AGENT_HANDOFF_AT: ${JARVIS_AGENT_HANDOFF_AT:-2700}
       JARVIS_AGENT_IDLE_TTL: ${JARVIS_AGENT_IDLE_TTL:-3300}
-      # Tope de trabajo por turno y espera al gestor antes de preguntar al usuario.
+      # Tope de trabajo por turno y espera al gestor antes de preguntar al usuario
+      # (red de seguridad: con Vision, el gestor responde o escala él mismo).
       JARVIS_AGENT_TURN_TIMEOUT: ${JARVIS_AGENT_TURN_TIMEOUT:-1800}
-      JARVIS_AGENT_MANAGER_TIMEOUT: ${JARVIS_AGENT_MANAGER_TIMEOUT:-300}
-      # Salvaguarda: con el uso de la ventana de la suscripción en este % o más,
-      # no se lanzan agentes ni empiezan turnos (el margen queda para el usuario).
-      JARVIS_AGENT_USAGE_LIMIT: ${JARVIS_AGENT_USAGE_LIMIT:-85}
+      JARVIS_AGENT_MANAGER_TIMEOUT: ${JARVIS_AGENT_MANAGER_TIMEOUT:-900}
+      # 1 = también las preguntas de diseño van primero al gestor (Vision). Ponlo a 0
+      # si Vision está apagado, para que no esperen al temporizador.
+      JARVIS_AGENT_ASK_MANAGER_FIRST: ${JARVIS_AGENT_ASK_MANAGER_FIRST:-1}
+      # Rama de integración del trabajo autónomo: los agentes de código parten de
+      # ella si existe (la crea el núcleo). Vacía = la rama principal.
+      JARVIS_INTEGRATION_BRANCH: ${JARVIS_INTEGRATION_BRANCH-develop}
+      # Salvaguarda: con el uso de la ventana de 5 h / semanal en este % o más, no
+      # se lanzan agentes ni empiezan turnos (el margen queda para el usuario). El uso
+      # real lo lee una sonda (1 token de Haiku cada JARVIS_USAGE_PROBE_EVERY s
+      # mientras haya agentes); si no puede leerlo, tampoco se lanza nada.
+      JARVIS_AGENT_USAGE_LIMIT: ${JARVIS_AGENT_USAGE_LIMIT:-60}
+      JARVIS_AGENT_USAGE_LIMIT_7D: ${JARVIS_AGENT_USAGE_LIMIT_7D:-75}
+      JARVIS_USAGE_PROBE: ${JARVIS_USAGE_PROBE:-1}
+      JARVIS_USAGE_PROBE_EVERY: ${JARVIS_USAGE_PROBE_EVERY:-120}
+      # Punto de control: cada vez que la ventana de 5 h sube este % durante un
+      # turno, se interrumpe al agente para que resuma y estime lo que falta
+      # (si es mucho, pide a Vision recortar el alcance). 0 = apagado.
+      JARVIS_AGENT_CHECKPOINT: ${JARVIS_AGENT_CHECKPOINT:-5}
+      # Al llegar al límite, los agentes guardan su trabajo (handoff) y quedan en
+      # pausa. session = esperan a que el usuario diga "retoma"; autonomous = se
+      # retoman solos al reiniciarse la ventana.
+      JARVIS_AGENT_USAGE_MODE: ${JARVIS_AGENT_USAGE_MODE:-session}
+      # Bare repo opcional con las reglas comunes de los agentes (agents/CLAUDE.md +
+      # rules/), montado desde el override. Si no está, solo el CLAUDE.md del proyecto.
+      JARVIS_AGENT_CONFIG_REPO: ${JARVIS_AGENT_CONFIG_REPO:-/config.git}
       TZ: ${TZ:-Europe/Madrid}
     # Solo localhost: el núcleo (host-net) llega por 127.0.0.1.
     ports:

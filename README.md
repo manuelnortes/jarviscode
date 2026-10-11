@@ -45,6 +45,10 @@ just interchangeable front-ends talking to it.
   - **Workspace**: the state of your dev projects by voice, plus dictated notes committed to git.
   - **Background agents**: delegate tasks to Claude agents that work on a repo in an isolated
     container while you keep talking; Jarvis tracks them and notifies you when they finish.
+  - **Vision, the autonomous manager**: an Opus session that reviews the agents' pull requests
+    against the project plan, merges them into `develop`, answers their questions and launches the
+    next item of the plan, without you in the loop. Usable without voice, over HTTP: see
+    [docs/vision.md](docs/vision.md).
 
 Each capability can be switched on or off: see [Capabilities](#capabilities).
 
@@ -149,17 +153,31 @@ Two modes:
 - **read**: the agent reads the code and searches the web, then reports back.
 - **code**: the agent works on its own branch `agent/<id>-<slug>`, runs the tests, commits, and the
   runner pushes **only that branch** and opens a **lightweight pull request** (title, description,
-  diffstat, test result) that you review. Nothing is ever merged automatically.
+  diffstat, test result). Code agents branch off an **integration branch** (`develop`, created and
+  synced with the main branch automatically); nothing ever reaches the main branch without you.
 
-Agents can **ask** while working: clarifications go to Jarvis (the manager), who answers or passes
-them on to you; design decisions go straight to you; if the manager does not answer in 5 minutes,
-the question goes to you. A waiting agent frees its slot for the others.
+**Vision** is the manager ([docs/vision.md](docs/vision.md)): it reviews each finished PR against the
+project's `PLAN.md` and merges it into `develop`, asks the agent for changes or passes it to you, and
+then launches the next item of the plan (one item per agent). You review `develop` → main yourself.
+Merging is guarded in code: only into the integration branch and only with passing tests. You can
+also merge or close a PR from the web UI's **PRs** panel (with its full diff) or by asking Jarvis.
+
+Agents can **ask** while working: questions go to Vision first, which answers what the plan settles
+and escalates the rest to you; if it does not answer within `JARVIS_AGENT_MANAGER_TIMEOUT`, the
+question goes to you. A waiting agent frees its slot for the others. An agent that needs another's
+work can wait for it: Vision tells it to continue once that PR is merged.
 
 A finished agent stays **idle** with its session (and the warm one-hour prompt cache) for
 follow-ups. After 35 minutes you get a heads-up; at 45 it writes a **handoff** (in code mode, a
 file named after its branch, `agent/<id>-<slug>.md`, committed to the branch) and at 55 the session
-closes. Messaging it later resumes from the handoff in a fresh session. If the subscription's usage
-limit is hit, the agent pauses and resumes by itself when the window resets.
+closes. Messaging it later resumes from the handoff in a fresh session.
+
+**Usage**: agents, Vision and you share the same subscription. The worker reads the real usage
+(a 1-token Haiku probe while agents run) and, at `JARVIS_AGENT_USAGE_LIMIT`, launches nothing and
+pauses the agents after saving their work (handoff); they resume when you say so, or by themselves
+when the window resets (`JARVIS_AGENT_USAGE_MODE=autonomous`). Every +5 % of the 5-hour window during
+a turn (`JARVIS_AGENT_CHECKPOINT`) the agent stops, estimates what is left and asks Vision to cut the
+scope if needed. `GET /metrics` on the worker gives cost, tokens and usage per turn.
 
 1. In `.env`: `JARVIS_AGENTS_URL=http://127.0.0.1:8113`, a random `JARVIS_WORKER_TOKEN` and
    `JARVIS_AGENT_REPOS=<repo>[,<repo>…]`.
@@ -175,17 +193,21 @@ limit is hit, the agent pauses and resumes by itself when the window resets.
 | `JARVIS_AGENTS_MAX` | `2` | Agents **working** at the same time; more wait in a queue |
 | `JARVIS_AGENT_MODEL` | `claude-sonnet-4-6` | Model of the agents |
 | `JARVIS_AGENT_IDLE_WARN` / `_HANDOFF_AT` / `_IDLE_TTL` | `2100` / `2700` / `3300` | Idle lifecycle (s): heads-up, handoff, session closed |
-| `JARVIS_AGENT_MANAGER_TIMEOUT` | `300` | Seconds a clarification waits for the manager before going to you |
+| `JARVIS_AGENT_MANAGER_TIMEOUT` | `900` | Seconds a question waits for the manager before going to you |
 | `JARVIS_AGENT_TURN_TIMEOUT` | `1800` | Max working seconds per turn (waiting for an answer does not count) |
-| `JARVIS_AGENT_USAGE_LIMIT` | `85` | Safeguard (%): at or above this usage of the subscription window (your own Claude usage included), no agents start and no new turns begin; paused ones resume when the window resets |
+| `JARVIS_AGENT_USAGE_LIMIT` / `_7D` | `60` / `75` | Safeguard (%) for the 5-hour / weekly window (your own Claude usage included): no agents start, running ones pause after a handoff |
+| `JARVIS_INTEGRATION_BRANCH` | `develop` | Branch where autonomous work is merged; empty = disabled |
 | `JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS` | `3600` | Voice session timeout while it is managing live agents (instead of 90 s) |
 | `JARVIS_WORKER_MEM_LIMIT` | `4g` | RAM cap of the worker (~0.35 GB per live agent session) |
 
+Vision's own variables (`JARVIS_VISION*`) are in [docs/vision.md](docs/vision.md#configuration).
+
 Agent states (`GET /agents`): `queued`, `working`, `waiting_input` (asked something), `idle`
-(finished, session kept for follow-ups), `rate_limited`, `done` (session closed, resumable),
-`failed`, `cancelled`. With ntfy you get a push when an agent finishes (with its PR), fails, pauses,
+(finished, session kept for follow-ups), `rate_limited`, `paused` (usage limit, work saved),
+`done` (session closed, resumable), `merged`, `failed`, `cancelled`. With ntfy you get a push when an agent finishes (with its PR), fails, pauses,
 needs your answer or has been idle for a while; without ntfy, Jarvis tells you on your next turn.
-Ask "how are the agents doing?", "what did it find?", "tell it to also…", "cancel it".
+Ask "how are the agents doing?", "what did it find?", "launch the next item of X", "merge it",
+"cancel it". Status questions are answered by Jarvis from what is logged; requests to act go to Vision.
 `GET /usage` on the worker shows the last known usage of the subscription window.
 
 ## Local development
@@ -231,7 +253,8 @@ and the length threshold, all commented and editable without touching the core.
 src/
 ├── core/          # Headless core: JarvisCore, model routing, FastAPI server, voice WS, TTS clip store
 ├── capabilities/  # MCP tools: Cast, YouTube, Spotify, ntfy, reminders, workspace, agents
-├── worker/        # Agent runner (separate container): queue, Claude sessions, states
+├── worker/        # Agent runner (separate container): queue, Claude sessions, states, usage
+├── vision/        # Vision, the autonomous manager of the agents (Opus session, tools)
 ├── voice/         # Audio capture, STT (faster-whisper), TTS (Piper)
 ├── frontends/     # Text REPL, WS client, desktop push-to-talk
 ├── satellite/     # Ambient satellite: mic, wake word, VAD, state machine
@@ -244,7 +267,8 @@ scripts/           # Smoke test, diagnostics and end-to-end test scripts
 - GPU offload of STT/TTS to a desktop RTX card woken on demand (Wake-on-LAN), with the always-on
   server as fallback.
 - Character voices with RVC on top of Piper.
-- Merging agents' pull requests by voice, a web view of the PRs, and GitHub/Bitbucket pull requests.
+- Standalone Vision: split it from the core into its own service, so agents + Vision run without Jarvis.
+- GitHub/Bitbucket pull requests, and a web view of the `develop` → main PR.
 - More rooms (satellites), a Telegram front-end, calendar and e-mail.
 
 ## License

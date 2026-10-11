@@ -126,7 +126,8 @@ falls back to neutral Piper.
 | Reminders | APScheduler + SQLite started in the FastAPI lifespan; they survive restarts and are delivered via ntfy |
 | Smart home | Home Assistant's MCP server (SSE + long-lived token) over the LAN; HA only exposes the lights |
 | Workspace | Purpose-built tools (one call per spoken question) over a read-only projects folder and bare repos; notes go to an Inbox in a git-tracked `TODO.md`, committed and pushed per change |
-| Agents | HTTP client to the `jarvis-worker` container (separate, non-root, token-protected), which runs a queue of Claude Agent SDK sessions on per-agent clones; the core polls it and notifies state changes via ntfy (or tells you on your next turn). Read or code mode: code agents work on `agent/*` branches (a UID-based `pre-receive` hook blocks anything else) and leave lightweight PRs; idle lifecycle with handoff inside the one-hour prompt cache |
+| Agents | HTTP client to the `jarvis-worker` container (separate, non-root, token-protected), which runs a queue of Claude Agent SDK sessions on per-agent clones; the core polls it and notifies state changes via ntfy (or tells you on your next turn). Read or code mode: code agents work on `agent/*` branches (a UID-based `pre-receive` hook blocks anything else) and leave lightweight PRs, branching off an integration branch (`develop`); idle lifecycle with handoff inside the one-hour prompt cache; real usage read with a 1-token probe, pause with handoff at the limit and checkpoints every +5 % of the window; per-turn metrics |
+| Vision | Long-lived Opus session inside the core that wakes on events (polls the worker over plain HTTP; no tokens while idle): answers agents' questions from the plan, reviews PRs and merges them into `develop`, launches the next plan item, unblocks agents waiting for another's PR. Handoff per project after 45 min idle, recycled past ~100k tokens of context. Jarvis only relays (`vision` tool) and `POST /vision/message` lets you talk to it without voice. See [vision.md](vision.md) |
 
 Capabilities are toggled with `JARVIS_CAPABILITIES` and switch themselves off when their configuration is missing; the system prompt only describes the active ones.
 
@@ -138,6 +139,7 @@ The current date and time are injected on every turn so the model can compute re
 - Credentials (Claude, ntfy, Spotify, HA) only in `.env`, never in code.
 - Web UI behind a reverse proxy with SSO; the core port stays on the LAN.
 - Home Assistant only exposes the entities Jarvis needs.
+- Agents: separate container without the core's secrets; their git user can only push `agent/*` (`pre-receive` hook). Vision can only merge into the integration branch with passing tests (`merge_guard`, in code); merging or closing on your behalf only during your own message's turn. The main branch is always yours.
 
 ## 10. Roadmap
 
@@ -152,6 +154,8 @@ The current date and time are injected on every turn so the model can compute re
 | 6 — Capabilities (ntfy, reminders, Spotify, YouTube) | ✅ |
 | 7 — Smart home (Home Assistant) | ✅ deployed |
 | 5 — GPU accelerator + character voices | 📋 planned |
+| 8 — Workspace by voice (projects, TODO, notes) | ✅ deployed |
+| 9 — Coding agents + Vision (autonomous manager) | ✅ deployed; pending: standalone Vision service |
 | Future — satellites around the house, Telegram, calendar, e-mail | 📋 |
 
 ## 11. References

@@ -4,7 +4,8 @@ Cada agente es una sesión ``ClaudeSDKClient`` (un proceso del CLI) con ``cwd`` 
 su propio clon del repo. Ver docs/plan/hito-9-agentes.md (D1–D12). Ciclo de vida:
 
     queued → working ⇄ waiting_input
-               │  └→ rate_limited → (resets_at) → working
+               │  └→ (salvaguarda de uso) handoff → paused ─(autónomo: al reiniciarse la
+               │       ventana · sesión: mensaje del usuario)→ working (en frío)
                └→ idle ──35 min: aviso──45: handoff──55: cierre──→ done (retomable en frío)
                     └─(mensaje)→ working …
     cualquier estado vivo → failed / cancelled
@@ -25,6 +26,7 @@ su propio clon del repo. Ver docs/plan/hito-9-agentes.md (D1–D12). Ciclo de vi
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -44,6 +46,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from src.worker import usage as usage_probe
 from src.worker.prs import LocalPRProvider, PRProvider, commits_ahead, git
 from src.worker.store import AgentStore
 from src.worker.tools import build_agent_server
@@ -72,20 +75,22 @@ sin tablas, porque Jarvis te lo resumirá en voz alta."""
 
 _CODE_RULES = """
 MODO CÓDIGO: trabajas en la rama {branch} (ya creada y activa; rama base: {base}).
-- Cambios pequeños y enfocados en la tarea; sigue el CLAUDE.md del proyecto si lo hay.
+- Cambios pequeños y enfocados en la tarea; sigue tus CLAUDE.md (el de usuario y el del proyecto, si los hay).
+- Prohibido inventar contratos: si necesitas un dato que no está en el encargo ni en el repo (campos de una API, nombres de variables de entorno, formato de un fichero…), pregúntalo con ask en vez de suponerlo. Las variables de entorno, con el nombre exacto del .env.example.
 - Si el proyecto tiene tests, ejecútalos y déjalos en verde (si necesitas dependencias, crea un entorno virtual en \
-.venv y no lo commitees).
-- Haz commit de tu trabajo con mensajes claros. NO hagas push ni cambies de rama: el sistema empuja tu rama.
+.venv y no lo commitees). Tests nuevos solo si el encargo o tu CLAUDE.md lo piden.
+- Haz commit de tu trabajo siguiendo la convención de tu CLAUDE.md (si no hay, mensajes claros). NO hagas push ni \
+cambies de rama: el sistema empuja tu rama.
 - Al terminar, llama a submit_pr con título, descripción y resultado de los tests. Después responde con un resumen \
 breve en español (como máximo 10 líneas), sin tablas."""
 
 _HANDOFF_CODE = """\
-RITUAL DE CIERRE: esta sesión se va a cerrar por inactividad. Escribe (o actualiza) el fichero `{branch}.md` en la \
+RITUAL DE CIERRE: esta sesión se va a cerrar {why}. Escribe (o actualiza) el fichero `{branch}.md` en la \
 raíz del repo con: qué se pidió, qué has hecho, estado actual (tests incluidos), qué falta y cómo retomarlo en frío \
 sin esta conversación. Haz commit de ese fichero (sin push). Responde solo con un resumen de ese handoff en 5 líneas."""
 
 _HANDOFF_READ = """\
-RITUAL DE CIERRE: esta sesión se va a cerrar por inactividad. Responde solo con un handoff para retomar en frío sin \
+RITUAL DE CIERRE: esta sesión se va a cerrar {why}. Responde solo con un handoff para retomar en frío sin \
 esta conversación: qué se pidió, qué encontraste, qué quedó pendiente (como máximo 15 líneas)."""
 
 _COLD_RESUME = """\
@@ -100,12 +105,57 @@ Nuevo mensaje:
 {text}"""
 
 
+# (f) Punto de control: se manda en la misma sesión tras interrumpir al agente.
+_CHECKPOINT = """\
+PUNTO DE CONTROL: te he interrumpido porque desde el último control la ventana de uso de la suscripción ha subido \
+un {pct:.0f} %. Resume en 3 líneas qué llevas hecho y estima cuánto te falta. Si ya habías terminado, repite tu \
+resumen final. Si te falta poco, continúa con la tarea. Si te falta mucho, pregunta a Vision con ask \
+(kind='clarification', empezando por "[punto de control]", con tu resumen y tu estimación) si recortar el alcance \
+y sigue lo que te diga."""
+
+# (e) Tipos de token de ResultMessage.usage que se guardan en las métricas.
+_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+# (e2) Filas de métricas separadas por más de esto (s) son tandas distintas: el hueco entre
+# ellas (tu uso, otro día) no se atribuye a los agentes.
+_METRICS_GAP = 1800.0
+
+
+def _tokens(usage: dict | None) -> dict:
+    """Tokens de un ``ResultMessage.usage`` (por consulta, no acumulado)."""
+    return {k: int((usage or {}).get(k) or 0) for k in _TOKEN_KEYS}
+
+
+def _window_moved(rows: list[dict], window: str) -> float:
+    """(e2) Cuánto subió una ventana (0–1) de punta a punta en cada tanda de filas.
+
+    Recorre las lecturas en orden (antes₁, después₁, antes₂…) y suma solo las subidas:
+    una bajada es un reinicio de la ventana y ese paso no cuenta.
+    """
+    moved, prev, prev_ts = 0.0, None, None
+    for row in rows:
+        if prev_ts is not None and row["ts"] - row.get("secs", 0) - prev_ts > _METRICS_GAP:
+            prev = None  # tanda nueva
+        for snap in (row.get("before") or {}, row.get("after") or {}):
+            value = snap.get(window)
+            if value is None:
+                continue
+            if prev is not None and value > prev:
+                moved += value - prev
+            prev = value
+        prev_ts = row["ts"]
+    return moved
+
+
 class RateLimited(Exception):
     """El agente chocó con el límite de uso de la suscripción."""
 
-    def __init__(self, resets_at: float | None) -> None:
+    def __init__(self, resets_at: float | None, safeguard: bool = False) -> None:
         super().__init__("Límite de uso alcanzado.")
         self.resets_at = resets_at
+        # True = lo paró nuestra salvaguarda antes del turno (aún se puede hacer el
+        # handoff); False = la API rechazó el turno (no queda margen ni para eso).
+        self.safeguard = safeguard
 
 
 def _slug(text: str, limit: int = 30) -> str:
@@ -134,10 +184,29 @@ class AgentManager:
         handoff_at: Segundos en ``idle`` hasta el ritual de cierre.
         idle_ttl: Segundos en ``idle`` hasta cerrar la sesión.
         turn_timeout: Tope de segundos TRABAJANDO por turno (sin contar esperas).
-        manager_timeout: Segundos que una aclaración espera al gestor antes de pasar al usuario.
-        usage_limit: Fracción de uso de la ventana de la suscripción (0–1) a partir de
-            la cual no se crean agentes ni empiezan turnos nuevos (salvaguarda).
+        manager_timeout: Segundos que una aclaración espera al gestor antes de pasar al usuario
+            (red de seguridad: con Vision activo, el gestor responde o escala él mismo).
+        manager_first: Si True, también las preguntas de diseño van primero al gestor
+            (Vision decide si son del usuario); si False, van directas al usuario.
+        usage_limit: Fracción de uso de la ventana de 5 h de la suscripción (0–1) a partir
+            de la cual no se crean agentes ni empiezan turnos nuevos (salvaguarda).
+        usage_limit_7d: Lo mismo para la ventana semanal (la peligrosa: tarda días en reiniciarse).
+        probe_token: Token OAuth para la sonda de uso (``usage.py``). Vacío = sin sonda:
+            la salvaguarda solo ve los RateLimitEvent (ciegos lejos del aviso).
+        probe_every: Segundos entre sondas mientras haya agentes vivos (y antes de lanzar
+            uno si la última lectura es más vieja).
+        probe_stale: Segundos a partir de los que la última lectura no vale y el uso
+            pasa a desconocido (no se lanza nada).
+        usage_mode: Qué pasa con los ``paused`` al reiniciarse la ventana: ``session``
+            (esperan a que el usuario diga que se retomen) o ``autonomous`` (se retoman solos).
         pr_provider: Dónde se publican los PR.
+        base_branch: Rama base preferida (la de integración, ``develop``) si existe en
+            el repo; si no, la principal. Vacía = siempre la principal.
+        config_repo: Bare repo opcional con las reglas comunes de los agentes
+            (``agents/CLAUDE.md`` + ``rules/``; en el homelab, ``dotclaude``). Si no
+            existe, los agentes solo cargan el CLAUDE.md del proyecto.
+        checkpoint: (f) Subida de la ventana de 5 h (0–1) durante un turno que dispara
+            un punto de control. 0 = apagado.
     """
 
     def __init__(
@@ -152,11 +221,26 @@ class AgentManager:
         handoff_at: float = 2700,
         idle_ttl: float = 3300,
         turn_timeout: float = 1800,
-        manager_timeout: float = 300,
-        usage_limit: float = 0.85,
+        manager_timeout: float = 900,
+        manager_first: bool = True,
+        usage_limit: float = 0.60,
+        usage_limit_7d: float = 0.75,
+        usage_mode: str = "session",
+        probe_token: str = "",
+        probe_every: float = 120,
+        probe_stale: float = 600,
         pr_provider: PRProvider | None = None,
+        base_branch: str = "develop",
+        config_repo: Path | None = None,
+        metrics_path: Path | None = None,
+        checkpoint: float = 0.05,
     ) -> None:
         self.store = store
+        # (e) Métricas por turno en JSONL: barato y sin dependencias. None = no se guardan.
+        # TODO (sin prisa): exponerlas a Prometheus (ya está en el homelab) para verlas en Grafana.
+        self.metrics_path = metrics_path
+        # (f) Subida de la ventana de 5 h (0–1) que dispara un punto de control. 0 = apagado.
+        self.checkpoint = checkpoint
         self.git_root = git_root
         self.work_root = work_root
         self.allowed_repos = allowed_repos
@@ -167,8 +251,16 @@ class AgentManager:
         self.idle_ttl = idle_ttl
         self.turn_timeout = turn_timeout
         self.manager_timeout = manager_timeout
+        self.manager_first = manager_first
         self.usage_limit = usage_limit
+        self.usage_limit_7d = usage_limit_7d
+        self.usage_mode = usage_mode
+        self.probe_token = probe_token
+        self.probe_every = probe_every
+        self.probe_stale = probe_stale
         self.prs = pr_provider or LocalPRProvider()
+        self.base_branch = base_branch
+        self.config_repo = config_repo
         # Huecos de trabajo. Se gestionan a mano (no `async with`) porque un agente
         # que pregunta suelta el suyo y lo recupera al recibir la respuesta.
         self._slots = asyncio.Semaphore(max_working)
@@ -179,12 +271,21 @@ class AgentManager:
         self._pending: dict[str, list[str]] = {}
         # Respuestas que espera un agente bloqueado en `ask`.
         self._answers: dict[str, asyncio.Future] = {}
+        # Último ``total_cost_usd`` visto por sesión del CLI: es ACUMULADO por sesión
+        # (verificado 2026-10-08: 0,0028 → 0,0049 → 0,0074 en tres consultas), así
+        # que cada turno suma solo la diferencia. Se reinicia al abrir sesión nueva.
+        self._session_cost: dict[str, float] = {}
         # Datos de PR que el agente dejó con submit_pr en el turno en curso.
         self._pr_requests: dict[str, dict] = {}
-        # Último estado de uso visto por ventana (five_hour, seven_day…), de los
-        # RateLimitEvent del CLI. Alimenta la salvaguarda y GET /usage.
+        # Último estado de uso visto por ventana (five_hour, seven_day…). Con token, de
+        # la sonda (usage.py); sin él, de los RateLimitEvent del CLI. Alimenta la
+        # salvaguarda y GET /usage.
         self.windows: dict[str, dict] = {}
+        self._probed_at: float | None = None  # última sonda buena
+        self._probe_error = ""
+        self._probe_lock = asyncio.Lock()  # sin sondas duplicadas si piden a la vez
         self._reaper: asyncio.Task | None = None
+        self._prober: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ #
     # Ciclo de vida del gestor
@@ -195,11 +296,14 @@ class AgentManager:
         if orphans:
             log.warning("%d agentes de una ejecución anterior marcados como failed", orphans)
         self._reaper = asyncio.create_task(self._reap_loop())
+        if self.probe_token:
+            self._prober = asyncio.create_task(self._probe_loop())
 
     async def shutdown(self) -> None:
         """Cierra todas las sesiones (al apagar el worker)."""
-        if self._reaper:
-            self._reaper.cancel()
+        for loop_task in (self._reaper, self._prober):
+            if loop_task:
+                loop_task.cancel()
         for task in list(self._tasks.values()):
             task.cancel()
         for agent_id in list(self._clients):
@@ -230,7 +334,7 @@ class AgentManager:
         self._spawn(agent_id, self._run(agent_id, first=True))
         return agent
 
-    async def message(self, agent_id: str, text: str) -> dict:
+    async def message(self, agent_id: str, text: str, by: str = "") -> dict:
         """Manda un mensaje a un agente; qué hace depende de su estado.
 
         - ``queued``: se añade a la tarea.
@@ -238,6 +342,12 @@ class AgentManager:
         - ``waiting_input``: es la respuesta a su pregunta.
         - ``idle``: retoma la sesión (mismo contexto, caché caliente).
         - ``done``: sesión nueva sembrada con el handoff (retomar en frío).
+        - ``paused``: igual que ``done`` (o desde cero si no llegó a empezar).
+
+        Args:
+            agent_id: Agente.
+            text: Mensaje.
+            by: Quién responde (p. ej. ``vision``), para la bitácora. Vacío = Jarvis/usuario.
 
         Raises:
             ValueError: Si el agente no existe o ya no acepta mensajes.
@@ -253,6 +363,9 @@ class AgentManager:
             fut = self._answers.get(agent_id)
             if fut and not fut.done():
                 fut.set_result(text)
+                # Una respuesta a su pregunta es una decisión sobre el encargo: a la bitácora.
+                who = f" ({by})" if by else ""
+                self.store.append_note(agent_id, f"P: {agent.get('question') or '?'} → R{who}: {text}")
             return self.store.get(agent_id)
         if state == "idle" and agent_id in self._clients and not self._busy(agent_id):
             self.store.update(agent_id, state="queued", idle_since=None)
@@ -265,7 +378,21 @@ class AgentManager:
             self.store.update(agent_id, state="queued", idle_since=None)
             self._spawn(agent_id, self._run(agent_id, prompt=text, cold=True))
             return self.store.get(agent_id)
+        if state == "paused":  # el usuario lo retoma tras la pausa por límite de uso
+            self._resume(agent, text)
+            return self.store.get(agent_id)
         raise ValueError(f"El agente {agent_id} está '{state}' y ya no acepta mensajes.")
+
+    def note(self, agent_id: str, text: str) -> dict:
+        """Apunta una decisión o criterio en la bitácora del gestor del agente.
+
+        Raises:
+            ValueError: Si el agente no existe o la nota está vacía.
+        """
+        self._require(agent_id)
+        if not text.strip():
+            raise ValueError("La nota está vacía.")
+        return self.store.append_note(agent_id, text)
 
     def escalate(self, agent_id: str) -> dict:
         """El gestor pasa al usuario la pregunta pendiente de un agente (D9)."""
@@ -275,9 +402,15 @@ class AgentManager:
         return self.store.update(agent_id, waiting_on="user")
 
     async def cancel(self, agent_id: str) -> dict:
-        """Cancela un agente (interrumpe su turno si está trabajando)."""
+        """Cancela un agente (interrumpe su turno si está trabajando).
+
+        Sobre un agente ``failed`` sirve para darlo por revisado: pasa a ``cancelled``
+        y deja de salir en "¿cómo van los agentes?" (Fase 4).
+        """
         agent = self._require(agent_id)
-        if agent["state"] in ("done", "merged", "failed", "cancelled"):
+        if agent["state"] == "failed":
+            return self.store.update(agent_id, state="cancelled")
+        if agent["state"] in ("done", "merged", "cancelled"):
             return agent
         client = self._clients.get(agent_id)
         if client and agent["state"] == "working":
@@ -294,6 +427,89 @@ class AgentManager:
             agent_id, state="cancelled", substate=None, idle_since=None, waiting_on=None, question=None
         )
 
+    async def mark_merged(self, agent_id: str, shas: dict) -> dict:
+        """Marca como fusionado el PR de un agente (la fusión la hace el núcleo).
+
+        El worker no fusiona: su UID solo puede empujar ``agent/*`` (D12). El
+        núcleo comprueba con ``merge_check`` antes de fusionar y llama aquí al
+        terminar; si el agente seguía en ``idle``, se cierra su sesión.
+
+        Args:
+            agent_id: Agente con PR abierto.
+            shas: ``base_sha``, ``branch_sha`` y ``merge_sha`` (para el rollback).
+
+        Raises:
+            ValueError: Si el agente no existe o no tiene PR abierto.
+        """
+        agent = self._require(agent_id)
+        if agent.get("pr_status") != "open":
+            raise ValueError(f"El agente {agent_id} no tiene un PR abierto.")
+        task = self._tasks.pop(agent_id, None)
+        if task and not task.done():
+            task.cancel()
+        await self._close_client(agent_id)
+        self._release(agent_id)
+        self._pending.pop(agent_id, None)
+        return self.store.update(
+            agent_id, state="merged", substate=None, idle_since=None, waiting_on=None,
+            question=None, pr_status="merged", merged_at=time.time(),
+            pr_base_sha=shas.get("base_sha"), pr_branch_sha=shas.get("branch_sha"),
+            pr_merge_sha=shas.get("merge_sha"),
+            # La bitácora ya va en el PLAN.md del PR (el gestor se la pasa al agente
+            # antes de dar el PR por bueno): queda marcada, no se borra.
+            notes_merged=1 if agent.get("manager_notes") else 0,
+        )
+
+    async def mark_closed(self, agent_id: str) -> dict:
+        """Cierra sin fusionar el PR de un agente (redundante o descartado).
+
+        La rama se queda en el bare: cerrar no borra trabajo. Se guarda su punta en
+        ``pr_branch_sha`` por si alguien la borra después y hay que recuperarla.
+
+        Raises:
+            ValueError: Si el agente no existe, no tiene PR abierto o está trabajando.
+        """
+        agent = self._require(agent_id)
+        if agent.get("pr_status") != "open":
+            raise ValueError(f"El agente {agent_id} no tiene un PR abierto.")
+        # Como para fusionar, el agente parado; pero aquí también vale un cancelado o
+        # fallido (su PR quedó huérfano y cerrarlo es justo lo que hace falta).
+        if agent["state"] not in ("idle", "done", "cancelled", "failed") or self._busy(agent_id):
+            raise ValueError(f"El agente {agent_id} está '{agent['state']}': espera a que termine para cerrar su PR.")
+        await self._close_client(agent_id)
+        self._release(agent_id)
+        self._pending.pop(agent_id, None)
+        return self.store.update(
+            agent_id, state="done" if agent["state"] == "done" else "cancelled", substate=None,
+            idle_since=None, waiting_on=None, question=None, pr_status="closed",
+            pr_branch_sha=self._branch_sha(agent),
+        )
+
+    def _branch_sha(self, agent: dict) -> str | None:
+        """Punta de la rama del agente en el bare (None si no se puede leer)."""
+        try:
+            return git(self.git_root / f"{agent['repo']}.git", "rev-parse", f"refs/heads/{agent['branch']}") or None
+        except Exception:  # noqa: BLE001 - el SHA es informativo; cerrar no depende de él
+            return None
+
+    def merge_check(self, agent_id: str) -> dict:
+        """Comprueba que el PR de un agente se puede fusionar ahora.
+
+        Solo con el agente parado (``idle`` sin turno en curso, o ``done``): si
+        está trabajando o haciendo su ritual de cierre, la rama aún puede cambiar.
+
+        Raises:
+            ValueError: Con el motivo si no se puede fusionar.
+        """
+        agent = self._require(agent_id)
+        if agent.get("pr_status") != "open":
+            raise ValueError(f"El agente {agent_id} no tiene un PR abierto.")
+        if agent["state"] not in ("idle", "done") or self._busy(agent_id):
+            raise ValueError(
+                f"El agente {agent_id} está '{agent['state']}': espera a que termine para fusionar."
+            )
+        return agent
+
     # ------------------------------------------------------------------ #
     # Herramientas del agente (las llama src/worker/tools.py)
     # ------------------------------------------------------------------ #
@@ -304,7 +520,11 @@ class AgentManager:
         """
         fut = asyncio.get_running_loop().create_future()
         self._answers[agent_id] = fut
-        waiting_on = "user" if kind == "design" else "manager"
+        waiting_on = "user" if kind == "design" and not self.manager_first else "manager"
+        if kind == "design" and self.manager_first:
+            # Con Vision, el gestor ve todas las preguntas primero: la marca le dice
+            # que el agente la considera de diseño (probablemente del usuario).
+            question = f"[diseño] {question}"
         self.store.update(
             agent_id, state="waiting_input", substate=None, waiting_on=waiting_on, question=question
         )
@@ -328,40 +548,90 @@ class AgentManager:
 
     def usage(self) -> dict:
         """Uso conocido de la suscripción por ventana, el límite y si bloquea."""
-        blocked, resets_at = self._over_usage()
+        state, resets_at = self._usage_state()
         return {
             "windows": self.windows,
-            "limit": self.usage_limit,
-            "blocked": blocked,
+            "limit": self.usage_limit,  # el de 5 h (compatibilidad)
+            "limits": {"five_hour": self.usage_limit, "seven_day": self.usage_limit_7d},
+            "blocked": state != "ok",
+            "unknown": state == "unknown",
             "resets_at": resets_at,
+            "source": "probe" if self.probe_token else "events",
+            "probed_at": self._probed_at,
+            "probe_error": self._probe_error,
         }
 
-    def _over_usage(self, now: float | None = None) -> tuple[bool, float | None]:
-        """Salvaguarda de uso: ¿alguna ventana vigente está en el límite o por encima?
+    async def refresh_usage(self, force: bool = False) -> None:
+        """Sondea el uso real si la última lectura tiene más de ``probe_every`` s.
 
-        Solo cuentan las lecturas vigentes (ventana aún sin reiniciar). Sin datos,
-        no se bloquea.
+        Nunca lanza: si la sonda falla se queda la lectura anterior, que deja de valer
+        a los ``probe_stale`` s (entonces la salvaguarda bloquea por uso desconocido).
+        """
+        if not self.probe_token:
+            return
+        async with self._probe_lock:
+            if not force and self._probed_at and time.time() - self._probed_at < self.probe_every:
+                return
+            try:
+                windows = await asyncio.to_thread(usage_probe.probe, self.probe_token)
+            except Exception as exc:  # noqa: BLE001 - la salvaguarda decide con lo que haya
+                self._probe_error = f"{type(exc).__name__}: {exc}"[:200]
+                log.warning("Sonda de uso fallida: %s", self._probe_error)
+                return
+            now = time.time()
+            for window in windows.values():
+                window["seen_at"] = now
+            self.windows.update(windows)
+            self._probed_at = now
+            self._probe_error = ""
+
+    async def _probe_loop(self) -> None:
+        """Sonda periódica mientras haya agentes vivos (sin agentes no se gasta nada)."""
+        while True:
+            try:
+                if self.store.list(include_final=False):
+                    await self.refresh_usage()
+            except Exception:  # noqa: BLE001 - el bucle nunca debe morir
+                log.exception("Fallo en el bucle de la sonda de uso")
+            await asyncio.sleep(self.probe_every)
+
+    def _usage_state(self, now: float | None = None) -> tuple[str, float | None]:
+        """Estado de la salvaguarda: ``ok``, ``over`` o ``unknown`` (ver ``usage.assess``)."""
+        return usage_probe.assess(
+            self.windows, self.usage_limit, self.usage_limit_7d,
+            probing=bool(self.probe_token), probed_at=self._probed_at,
+            now=now or time.time(), stale_after=self.probe_stale,
+        )
+
+    def _over_usage(self, now: float | None = None) -> tuple[bool, float | None]:
+        """Salvaguarda de uso: ¿bloquea? (ventana en su límite o uso desconocido).
 
         Returns:
             Tupla (bloqueado, hora de reinicio más tardía de las ventanas que bloquean).
         """
-        now = now or time.time()
-        resets = [
-            w.get("resets_at") for w in self.windows.values()
-            if w.get("utilization") is not None and w["utilization"] >= self.usage_limit
-            and (not w.get("resets_at") or w["resets_at"] > now)
-        ]
-        if not resets:
-            return False, None
-        known = [r for r in resets if r]
-        return True, (max(known) if known else None)
+        state, resets_at = self._usage_state(now)
+        return state != "ok", resets_at
 
     def _usage_message(self, resets_at: float | None) -> str:
         """Texto para el gestor cuando la salvaguarda de uso bloquea."""
-        pct = max((w.get("utilization") or 0) for w in self.windows.values()) * 100
-        when = time.strftime("%H:%M", time.localtime(resets_at)) if resets_at else "desconocida"
-        return (f"Uso de la suscripción al {pct:.0f} %, por encima del límite de agentes "
-                f"({self.usage_limit * 100:.0f} %). La ventana se reinicia a las {when}.")
+        if self._usage_state()[0] == "unknown":
+            return ("No se puede leer el uso de la suscripción (la sonda falla o no hay lectura "
+                    "reciente): por seguridad no se lanzan agentes. "
+                    f"{self._probe_error or 'Aún no hay lectura.'}")
+        over = [
+            f"{name} al {w['utilization'] * 100:.0f} % (límite "
+            f"{usage_probe.limit_for(name, self.usage_limit, self.usage_limit_7d) * 100:.0f} %)"
+            for name, w in self.windows.items()
+            if w.get("utilization") is not None
+            and w["utilization"] >= usage_probe.limit_for(name, self.usage_limit, self.usage_limit_7d)
+        ]
+        if resets_at:
+            fmt = "%H:%M" if resets_at - time.time() < 86400 else "%d/%m %H:%M"
+            when = time.strftime(fmt, time.localtime(resets_at))
+        else:
+            when = "desconocida"
+        return (f"Uso de la suscripción por encima del límite de agentes: {', '.join(over)}. "
+                f"Se reinicia a las {when}.")
 
     # ------------------------------------------------------------------ #
     # Ejecución
@@ -402,6 +672,7 @@ class AgentManager:
             agent = self.store.get(agent_id)
             if agent["state"] != "queued":  # cancelado mientras esperaba
                 return
+            await self.refresh_usage()
             blocked, resets_at = self._over_usage()
             if blocked:
                 # Salvaguarda: no empieza el turno. El mensaje se guarda para cuando
@@ -410,7 +681,7 @@ class AgentManager:
                 rest = (prompt or "").removeprefix(_RESUME_TEXT).strip()
                 if rest and not first:
                     self._pending.setdefault(agent_id, []).insert(0, rest)
-                raise RateLimited(resets_at)
+                raise RateLimited(resets_at, safeguard=True)
             self.store.update(agent_id, state="working", substate="setup", idle_warned=0, handoff_done=0)
             if first or cold:
                 workdir = await asyncio.to_thread(self._prepare_workdir, agent_id)
@@ -428,9 +699,7 @@ class AgentManager:
         except asyncio.CancelledError:
             raise
         except RateLimited as exc:
-            resume = exc.resets_at or (time.time() + 900)
-            log.warning("Agente %s: límite de uso; reanuda a las %s", agent_id, time.ctime(resume))
-            self.store.update(agent_id, state="rate_limited", substate=None, resume_at=resume)
+            await self._pause(agent_id, exc)
             return
         except Exception as exc:  # noqa: BLE001 - cualquier fallo deja el agente en failed
             log.exception("Agente %s falló", agent_id)
@@ -440,6 +709,30 @@ class AgentManager:
         finally:
             self._release(agent_id)
         await self._after_turn(agent_id)
+
+    async def _pause(self, agent_id: str, exc: RateLimited) -> None:
+        """Límite de uso: guarda el trabajo, cierra la sesión y deja el agente en ``paused``.
+
+        Con sesión abierta y margen (lo paró la salvaguarda, no la API), el agente
+        escribe antes su handoff: al retomarlo, una sesión nueva arranca de ahí en vez
+        de recargar toda la conversación sin caché. Se llama con el hueco tomado.
+        """
+        resume = exc.resets_at or (time.time() + 900)
+        agent = self.store.get(agent_id)
+        if exc.safeguard and agent_id in self._clients and (agent["turns"] or 0) > 0:
+            why = "por el límite de uso de la suscripción (se retomará en una sesión nueva)"
+            prompt = (_HANDOFF_CODE.format(branch=agent["branch"], why=why) if agent["mode"] == "code"
+                      else _HANDOFF_READ.format(why=why))
+            try:
+                result_before = agent["result"]
+                summary = await self._turn(agent_id, prompt, substate="handoff")
+                self.store.update(agent_id, result=result_before, handoff=summary, handoff_done=1)
+                await self._publish_pr(agent_id)
+            except Exception:  # noqa: BLE001 - sin handoff se retoma con el último resultado
+                log.exception("Agente %s: falló el handoff de la pausa", agent_id)
+        await self._close_client(agent_id)
+        log.warning("Agente %s: límite de uso → paused (ventana hasta %s)", agent_id, time.ctime(resume))
+        self.store.update(agent_id, state="paused", substate=None, idle_since=None, resume_at=resume)
 
     async def _after_turn(self, agent_id: str, keep_idle_since: float | None = None) -> None:
         """Tras un turno: procesa mensajes pendientes o pasa a ``idle``."""
@@ -455,10 +748,15 @@ class AgentManager:
             await self._limit_idle()
 
     async def _turn(self, agent_id: str, prompt: str, substate: str = "thinking") -> str:
-        """Ejecuta un turno y guarda resultado, coste y nº de turnos.
+        """Ejecuta un turno y guarda resultado, coste, tokens y nº de turnos.
 
         El tope ``turn_timeout`` solo cuenta el tiempo en ``working``: una espera
         en ``ask`` no consume el presupuesto del turno.
+
+        (f) Puntos de control: si la ventana de 5 h sube ``checkpoint`` desde el inicio
+        del tramo, se interrumpe al agente (la sesión sigue viva, con su contexto) y se le
+        manda ``_CHECKPOINT`` en la misma sesión: resume, estima lo que falta y sigue o
+        pide a Vision que le recorte el alcance. Cada tramo es una fila de métricas.
 
         Returns:
             El texto final del agente.
@@ -469,56 +767,169 @@ class AgentManager:
         """
         client = self._clients[agent_id]
         self.store.update(agent_id, state="working", substate=substate)
-        texts: list[str] = []
-        limit_hit: list[float | None] = []
-
-        async def consume() -> ResultMessage | None:
-            await client.query(prompt)
-            final = None
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    texts.extend(b.text for b in msg.content if isinstance(b, TextBlock))
-                elif isinstance(msg, RateLimitEvent):
-                    info = msg.rate_limit_info
-                    self.windows[info.rate_limit_type or "unknown"] = {
-                        "status": info.status, "resets_at": info.resets_at,
-                        "utilization": info.utilization, "seen_at": time.time(),
-                    }
-                    if info.status == "rejected":
-                        limit_hit.append(info.resets_at)
-                elif isinstance(msg, ResultMessage):
-                    final = msg
-            return final
-
-        task = asyncio.create_task(consume())
-        worked = 0.0
+        worked = 0.0  # compartido por todos los tramos: el tope es del turno entero
         while True:
-            done, _ = await asyncio.wait({task}, timeout=15)
-            if done:
-                break
-            if self.store.get(agent_id)["state"] == "working":
-                worked += 15
-            if worked > self.turn_timeout:
-                try:
-                    await client.interrupt()
-                finally:
-                    task.cancel()
-                raise TimeoutError(f"El agente trabajó más de {self.turn_timeout:.0f} s en un turno.")
-        final = task.result()
+            started = time.time()
+            usage_before = self._usage_snapshot()
+            base = self._five_hour()
+            texts: list[str] = []
+            limit_hit: list[float | None] = []
 
-        result = (final.result if final and final.result else "\n".join(texts)).strip()
-        if final and final.is_error:
-            if limit_hit or "limit" in result.lower():
-                raise RateLimited(limit_hit[0] if limit_hit else None)
-            raise RuntimeError(result or "El agente terminó con error.")
-        agent = self.store.get(agent_id)
-        self.store.update(
-            agent_id,
-            result=result,
-            cost_usd=(agent["cost_usd"] or 0) + ((final.total_cost_usd or 0) if final else 0),
-            turns=(agent["turns"] or 0) + (final.num_turns if final else 0),
-        )
-        return result
+            async def consume(query: str) -> ResultMessage | None:
+                await client.query(query)
+                final = None
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        texts.extend(b.text for b in msg.content if isinstance(b, TextBlock))
+                    elif isinstance(msg, RateLimitEvent):
+                        info = msg.rate_limit_info
+                        # Con sonda, sus lecturas mandan: el evento traía 0 % lejos del aviso
+                        # y machacaría el dato real. El "rejected" sí cuenta siempre (abajo).
+                        if not self.probe_token:
+                            self.windows[info.rate_limit_type or "unknown"] = {
+                                "status": info.status, "resets_at": info.resets_at,
+                                "utilization": info.utilization, "seen_at": time.time(),
+                            }
+                        if info.status == "rejected":
+                            limit_hit.append(info.resets_at)
+                    elif isinstance(msg, ResultMessage):
+                        final = msg
+                return final
+
+            task = asyncio.create_task(consume(prompt))
+            checkpoint = False
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=15)
+                if done:
+                    break
+                if self.store.get(agent_id)["state"] != "working":
+                    continue  # esperando en ask: ni cuenta tiempo ni se interrumpe
+                worked += 15
+                if worked > self.turn_timeout:
+                    try:
+                        await client.interrupt()
+                    finally:
+                        task.cancel()
+                    raise TimeoutError(f"El agente trabajó más de {self.turn_timeout:.0f} s en un turno.")
+                if base is None:
+                    base = self._five_hour()  # sin lectura al empezar: cuenta desde la primera
+                if not checkpoint and self._checkpoint_due(base, substate):
+                    checkpoint = True
+                    log.info("Agente %s: punto de control (5 h de %.0f %% a %.0f %%)",
+                             agent_id, base * 100, (self._five_hour() or 0) * 100)
+                    try:
+                        await client.interrupt()
+                    except Exception:  # noqa: BLE001 - si no se puede, el turno sigue sin control
+                        log.exception("Agente %s: no se pudo interrumpir en el punto de control", agent_id)
+            final = task.result()
+
+            result = (final.result if final and final.result else "\n".join(texts)).strip()
+            if final and final.is_error:
+                if limit_hit or "limit" in result.lower():
+                    raise RateLimited(limit_hit[0] if limit_hit else None)
+                # Tras interrumpir, el CLI puede cerrar el tramo como error: es el corte buscado.
+                if not checkpoint:
+                    raise RuntimeError(result or "El agente terminó con error.")
+            agent = self.store.get(agent_id)
+            # total_cost_usd es ACUMULADO por sesión; usage (tokens) viene POR CONSULTA
+            # (verificado 2026-10-10 con dos consultas en la misma sesión).
+            session_total = (final.total_cost_usd or 0) if final else 0
+            turn_cost = max(0.0, session_total - self._session_cost.get(agent_id, 0.0))
+            if final:
+                self._session_cost[agent_id] = session_total
+            self.store.update(
+                agent_id,
+                result=result,
+                cost_usd=(agent["cost_usd"] or 0) + turn_cost,
+                turns=(agent["turns"] or 0) + (final.num_turns if final else 0),
+            )
+            await self._record_turn(agent, substate, started, turn_cost,
+                                    final.num_turns if final else 0, usage_before,
+                                    tokens=_tokens(final.usage if final else None),
+                                    checkpoint=checkpoint)
+            if not checkpoint:
+                return result
+            prompt = _CHECKPOINT.format(pct=self.checkpoint * 100)
+            self.store.update(agent_id, state="working", substate="checkpoint")
+
+    def _five_hour(self) -> float | None:
+        """Utilización conocida de la ventana de 5 h (0–1), sin sondear."""
+        return self.windows.get("five_hour", {}).get("utilization")
+
+    def _checkpoint_due(self, base: float | None, substate: str) -> bool:
+        """(f) ¿Toca punto de control? La ventana subió ``checkpoint`` desde ``base``.
+
+        Nunca en el handoff (es el cierre de la sesión). Mide la ventana real, así que el
+        uso del usuario en paralelo también cuenta: es lo que importa para los límites.
+        """
+        now = self._five_hour()
+        if self.checkpoint <= 0 or substate == "handoff" or base is None or now is None:
+            return False
+        return now - base >= self.checkpoint - 1e-9
+
+    def _usage_snapshot(self) -> dict:
+        """Última lectura de uso conocida (sin sondear): utilización por ventana y su hora."""
+        snap = {k: w.get("utilization") for k, w in self.windows.items()}
+        snap["probed_at"] = self._probed_at
+        return snap
+
+    async def _record_turn(
+        self, agent: dict, substate: str, started: float, cost: float, num_turns: int, before: dict,
+        tokens: dict | None = None, checkpoint: bool = False,
+    ) -> None:
+        """(e) Apunta una fila por turno (o tramo): tokens, coste y uso de las ventanas antes/después.
+
+        Los tokens son la medida buena (con muestras se extrapola cuánto % sube la ventana
+        cada X tokens); el $ es una estimación del CLI y se guarda solo como referencia.
+        Sin sondas extra: el "después" es la última lectura, refrescada solo si tiene más de
+        ``probe_every`` s. El uso propio del usuario en paralelo ensucia el delta: vale como
+        estimación, se afina con muchas muestras.
+        """
+        if not self.metrics_path:
+            return
+        try:
+            await self.refresh_usage()
+            row = {
+                "ts": round(time.time(), 1), "agent": agent["id"], "repo": agent["repo"],
+                "mode": agent["mode"], "substate": substate, "model": self.model,
+                "secs": round(time.time() - started, 1), "tokens": tokens or {},
+                "cost_usd": round(cost, 5), "num_turns": num_turns, "checkpoint": checkpoint,
+                "before": before, "after": self._usage_snapshot(),
+            }
+            with self.metrics_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except Exception:  # noqa: BLE001 - una métrica perdida no tumba el turno
+            log.exception("No se pudo guardar la métrica del turno de %s", agent["id"])
+
+    def metrics(self, last: int = 50) -> dict:
+        """Últimas filas de métricas y un resumen: tokens, coste y % de cada ventana movido.
+
+        (e2) El % movido se mide de punta a punta por tandas (filas separadas por menos de
+        ``_METRICS_GAP``), no sumando el delta de cada turno: con turnos cortos (< 120 s
+        entre sondas) el antes y el después eran la misma lectura y todo salía 0 %.
+        """
+        rows = []
+        if self.metrics_path and self.metrics_path.exists():
+            with self.metrics_path.open(encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh if line.strip()]
+        cost = sum(r.get("cost_usd") or 0 for r in rows)
+        tokens = {k: sum((r.get("tokens") or {}).get(k, 0) for r in rows) for k in _TOKEN_KEYS}
+        tokens["total"] = sum(tokens.values())
+        # Las filas antiguas (antes de guardar tokens) suman $ pero no tokens: el % por
+        # millón de tokens solo con las que los tienen, para no falsear la proporción.
+        with_tokens = [r for r in rows if r.get("tokens")]
+        summary: dict = {
+            "turns": len(rows), "checkpoints": sum(1 for r in rows if r.get("checkpoint")),
+            "tokens": tokens, "cost_usd": round(cost, 4),
+        }
+        for window in ("five_hour", "seven_day"):
+            moved = _window_moved(rows, window)
+            moved_tok = _window_moved(with_tokens, window)
+            summary[f"{window}_pct_moved"] = round(moved * 100, 1)
+            summary[f"{window}_pct_per_mtok"] = (
+                round(moved_tok * 100 / (tokens["total"] / 1e6), 2) if tokens["total"] else None)
+            summary[f"{window}_pct_per_usd"] = round(moved * 100 / cost, 2) if cost else None
+        return {"summary": summary, "rows": rows[-last:]}
 
     async def _publish_pr(self, agent_id: str) -> None:
         """Modo código: si hay commits nuevos, empuja la rama y actualiza el PR."""
@@ -543,6 +954,7 @@ class AgentManager:
         rules = _COMMON_RULES + (
             _CODE_RULES.format(branch=agent["branch"], base=agent["base_branch"]) if code else _READ_RULES
         )
+        await asyncio.to_thread(self._sync_agent_config)
         client = ClaudeSDKClient(options=ClaudeAgentOptions(
             model=self.model,
             cwd=str(workdir),
@@ -551,12 +963,47 @@ class AgentManager:
             mcp_servers={"agent": server},
             # La jaula es el contenedor (usuario no root, sin secretos ajenos).
             permission_mode="bypassPermissions",
-            # Carga el CLAUDE.md del proyecto: sus reglas valen también para el agente.
-            setting_sources=["project"],
+            # "user": reglas comunes de los agentes (ver _sync_agent_config);
+            # "project": el CLAUDE.md del repo, cuyas reglas valen también para el agente.
+            setting_sources=["user", "project"],
             system_prompt={"type": "preset", "preset": "claude_code", "append": rules},
         ))
         await client.connect()
         self._clients[agent_id] = client
+        self._session_cost[agent_id] = 0.0
+
+    def _sync_agent_config(self) -> None:
+        """Instala las reglas comunes de los agentes como config de usuario del CLI.
+
+        Clona (o actualiza) ``config_repo`` en ``work_root/../agent-config`` y deja en
+        ``~/.claude`` un CLAUDE.md que solo importa ``agents/CLAUDE.md`` + un enlace a
+        ``rules/``. Se llama antes de cada sesión: así un cambio de reglas llega al
+        siguiente agente sin reconstruir la imagen. Se lee del bare (solo lo
+        commiteado), no de una copia de trabajo a medias. Si falla, el agente
+        arranca igual con lo que hubiera: las reglas no deben tumbar un encargo.
+        """
+        if not self.config_repo or not self.config_repo.is_dir():
+            return
+        dest = self.work_root.parent / "agent-config"
+        try:
+            if not (dest / ".git").is_dir():
+                subprocess.run(
+                    ["git", "clone", "--quiet", str(self.config_repo), str(dest)],
+                    check=True, capture_output=True, text=True, timeout=120,
+                )
+            else:
+                git(dest, "fetch", "--quiet", "origin")
+                git(dest, "reset", "--quiet", "--hard", "origin/HEAD")
+        except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+            log.warning("No se pudieron actualizar las reglas de los agentes: %s", exc)
+        home = Path.home() / ".claude"
+        home.mkdir(parents=True, exist_ok=True)
+        if (dest / "agents" / "CLAUDE.md").is_file():
+            (home / "CLAUDE.md").write_text(f"@{dest}/agents/CLAUDE.md\n")
+        rules = home / "rules" / "shared"
+        if (dest / "rules").is_dir() and not rules.is_symlink():
+            rules.parent.mkdir(exist_ok=True)
+            rules.symlink_to(dest / "rules")
 
     def _prepare_workdir(self, agent_id: str) -> Path:
         """Clon de trabajo del agente, listo en su rama (reutiliza el que haya).
@@ -576,7 +1023,12 @@ class AgentManager:
                 check=True, capture_output=True, text=True, timeout=120,
             )
         git(dest, "fetch", "--quiet", "origin")
-        base = agent["base_branch"] or git(dest, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").split("/", 1)[-1]
+        base = agent["base_branch"]
+        if not base:
+            # Trabajo autónomo sobre la rama de integración si existe (la crea el núcleo).
+            wanted = self.base_branch and git(dest, "ls-remote", "--heads", "origin", self.base_branch, check=False)
+            base = self.base_branch if wanted else (
+                git(dest, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").split("/", 1)[-1])
         self.store.update(agent_id, base_branch=base)
         branch = agent["branch"]
         if branch:
@@ -612,8 +1064,9 @@ class AgentManager:
             await self._acquire(agent_id)
             if self.store.get(agent_id)["state"] != "idle":  # cancelado o retomado mientras esperaba hueco
                 return
-            prompt = (_HANDOFF_CODE.format(branch=agent["branch"]) if agent["mode"] == "code"
-                      else _HANDOFF_READ)
+            why = "por inactividad"
+            prompt = (_HANDOFF_CODE.format(branch=agent["branch"], why=why) if agent["mode"] == "code"
+                      else _HANDOFF_READ.format(why=why))
             # El handoff no pisa el resultado de la tarea: se guarda aparte.
             result_before = agent["result"]
             summary = await self._turn(agent_id, prompt, substate="handoff")
@@ -643,6 +1096,7 @@ class AgentManager:
     async def _close_client(self, agent_id: str) -> None:
         """Cierra la sesión del CLI de un agente, si la tiene."""
         client = self._clients.pop(agent_id, None)
+        self._session_cost.pop(agent_id, None)
         if client:
             try:
                 await client.disconnect()
@@ -682,16 +1136,26 @@ class AgentManager:
                     self._spawn(agent_id, self._handoff(agent_id))
                 elif idle_for > self.idle_warn and not agent["idle_warned"]:
                     self.store.update(agent_id, idle_warned=1)
+            elif (agent["state"] == "paused" and self.usage_mode == "autonomous"
+                  and agent["resume_at"] and now >= agent["resume_at"]):
+                # Modo autónomo: al reiniciarse la ventana, se retoma solo (en frío).
+                self._resume(agent, "")
             elif agent["state"] == "rate_limited" and agent["resume_at"] and now >= agent["resume_at"]:
-                self.store.update(agent_id, state="queued", resume_at=None)
-                if not agent["turns"] and agent_id not in self._clients:
-                    # Bloqueado antes de su primer turno: arranca de cero.
-                    self._spawn(agent_id, self._run(agent_id, first=True))
-                    continue
-                pending = self._pending.pop(agent_id, [])
-                text = "\n\n".join([_RESUME_TEXT, *pending])
-                cold = agent_id not in self._clients
-                self._spawn(agent_id, self._run(agent_id, prompt=text, cold=cold))
+                # Estado antiguo (antes de ``paused``): se retoma como antes.
+                self._resume(agent, "")
+
+    def _resume(self, agent: dict, text: str) -> None:
+        """Retoma un agente en pausa: de cero si no empezó; si no, en frío desde su handoff."""
+        agent_id = agent["id"]
+        self.store.update(agent_id, state="queued", resume_at=None)
+        if not agent["turns"] and agent_id not in self._clients:
+            if text:
+                self.store.update(agent_id, task=f"{agent['task']}\n\nAdemás: {text}")
+            self._spawn(agent_id, self._run(agent_id, first=True))
+            return
+        pending = self._pending.pop(agent_id, [])
+        prompt = "\n\n".join([_RESUME_TEXT, *pending, *([text] if text else [])])
+        self._spawn(agent_id, self._run(agent_id, prompt=prompt, cold=agent_id not in self._clients))
 
     def _require(self, agent_id: str) -> dict:
         """Agente por id o ValueError."""
@@ -708,6 +1172,7 @@ def manager_from_env() -> AgentManager:
     env = os.getenv
     return AgentManager(
         store=AgentStore(data / "agents.sqlite"),
+        metrics_path=data / "turn_metrics.jsonl",
         git_root=Path(env("JARVIS_AGENT_GIT_ROOT", "/repos")),
         work_root=data / "work",
         allowed_repos=repos,
@@ -717,8 +1182,18 @@ def manager_from_env() -> AgentManager:
         handoff_at=float(env("JARVIS_AGENT_HANDOFF_AT", "2700")),
         idle_ttl=float(env("JARVIS_AGENT_IDLE_TTL", "3300")),
         turn_timeout=float(env("JARVIS_AGENT_TURN_TIMEOUT", "1800")),
-        manager_timeout=float(env("JARVIS_AGENT_MANAGER_TIMEOUT", "300")),
-        usage_limit=_percent(env("JARVIS_AGENT_USAGE_LIMIT", "85")),
+        manager_timeout=float(env("JARVIS_AGENT_MANAGER_TIMEOUT", "900")),
+        manager_first=env("JARVIS_AGENT_ASK_MANAGER_FIRST", "1") != "0",
+        usage_limit=_percent(env("JARVIS_AGENT_USAGE_LIMIT", "60")),
+        usage_limit_7d=_percent(env("JARVIS_AGENT_USAGE_LIMIT_7D", "75")),
+        usage_mode=env("JARVIS_AGENT_USAGE_MODE", "session").strip().lower(),
+        # La sonda usa el mismo token que los agentes. JARVIS_USAGE_PROBE=0 la apaga.
+        probe_token=(env("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+                     if env("JARVIS_USAGE_PROBE", "1") != "0" else ""),
+        probe_every=float(env("JARVIS_USAGE_PROBE_EVERY", "120")),
+        checkpoint=_percent(env("JARVIS_AGENT_CHECKPOINT", "5")),
+        base_branch=env("JARVIS_INTEGRATION_BRANCH", "develop").strip(),
+        config_repo=Path(env("JARVIS_AGENT_CONFIG_REPO", "/config.git")),
     )
 
 

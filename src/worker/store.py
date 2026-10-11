@@ -14,7 +14,10 @@ from pathlib import Path
 
 # Estados en los que el agente sigue "vivo" (cuenta para el TTL largo de la
 # conversación y para "¿cómo van los agentes?").
-ACTIVE_STATES = ("queued", "working", "waiting_input", "idle", "rate_limited")
+ACTIVE_STATES = ("queued", "working", "waiting_input", "idle", "rate_limited", "paused")
+# Vivos con proceso del CLI detrás (o a punto de tenerlo): un reinicio del worker
+# los deja huérfanos. ``paused`` no: su trabajo está guardado y no tiene sesión.
+RUNNING_STATES = ("queued", "working", "waiting_input", "idle", "rate_limited")
 # Estados finales: el runner ya no hará nada más con ellos.
 FINAL_STATES = ("done", "merged", "failed", "cancelled")
 
@@ -51,13 +54,27 @@ _PHASE2_COLUMNS = {
     "handoff": "TEXT",             # ritual de cierre (estado para retomar en frío)
     "idle_warned": "INTEGER DEFAULT 0",
     "handoff_done": "INTEGER DEFAULT 0",
-    "resume_at": "REAL",           # rate_limited: cuándo reanudar
+    "resume_at": "REAL",           # rate_limited/paused: cuándo se reinicia la ventana de uso
+    # Fase 3 (fusión): SHA para el rollback. Antes de la rama = base_sha (o el
+    # 1.er padre del merge); la rama en sí = branch_sha (o el 2.º padre).
+    "pr_base_sha": "TEXT",
+    "pr_branch_sha": "TEXT",
+    "pr_merge_sha": "TEXT",
+    "merged_at": "REAL",
+}
+
+# Columnas de la Fase 4 (bitácora del gestor). ``manager_notes`` guarda lo que
+# el usuario y el gestor deciden sobre el encargo (líneas con fecha): la memoria
+# de la conversación se pierde al reciclarla, esto sobrevive en el worker.
+_PHASE4_COLUMNS = {
+    "manager_notes": "TEXT",
+    "notes_merged": "INTEGER DEFAULT 0",  # 1 = volcada al PLAN.md en el PR fusionado
 }
 
 # Columnas que se pueden actualizar con ``update`` (evita SQL con nombres arbitrarios).
 _UPDATABLE = {
     "state", "substate", "waiting_on", "question", "result", "error", "branch",
-    "cost_usd", "turns", "idle_since", "task", *_PHASE2_COLUMNS,
+    "cost_usd", "turns", "idle_since", "task", *_PHASE2_COLUMNS, "notes_merged",
 }
 
 
@@ -76,7 +93,7 @@ class AgentStore:
         with self._conn() as db:
             db.execute(_SCHEMA)
             have = {r["name"] for r in db.execute("PRAGMA table_info(agents)")}
-            for col, decl in _PHASE2_COLUMNS.items():
+            for col, decl in {**_PHASE2_COLUMNS, **_PHASE4_COLUMNS}.items():
                 if col not in have:
                     db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
 
@@ -108,6 +125,21 @@ class AgentStore:
             db.execute(f"UPDATE agents SET {cols} WHERE id = ?", (*fields.values(), agent_id))
         return self.get(agent_id)
 
+    def append_note(self, agent_id: str, note: str) -> dict:
+        """Añade una línea con fecha a la bitácora del gestor.
+
+        No toca ``updated_at``: una nota no es actividad del agente, y ese campo
+        decide si un agente cerrado sigue siendo "reciente" en el núcleo.
+        """
+        line = f"[{time.strftime('%Y-%m-%d %H:%M')}] {' '.join(note.split())}"
+        with self._lock, self._conn() as db:
+            db.execute(
+                "UPDATE agents SET manager_notes = COALESCE(manager_notes || char(10), '') || ?"
+                " WHERE id = ?",
+                (line, agent_id),
+            )
+        return self.get(agent_id)
+
     def get(self, agent_id: str) -> dict | None:
         """Un agente por id, o None."""
         with self._conn() as db:
@@ -131,11 +163,11 @@ class AgentStore:
         Las sesiones del CLI no sobreviven a un reinicio del worker: un agente que
         figuraba trabajando ya no tiene proceso detrás.
         """
-        marks = ",".join("?" for _ in ACTIVE_STATES)
+        marks = ",".join("?" for _ in RUNNING_STATES)
         with self._lock, self._conn() as db:
             cur = db.execute(
                 f"UPDATE agents SET state = 'failed', error = 'El worker se reinició.',"
                 f" updated_at = ? WHERE state IN ({marks})",
-                (time.time(), *ACTIVE_STATES),
+                (time.time(), *RUNNING_STATES),
             )
         return cur.rowcount

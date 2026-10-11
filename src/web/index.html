@@ -51,6 +51,11 @@
             <span class="np-chip__eq" aria-hidden="true"><i></i><i></i><i></i></span>
             <span class="np-chip__title" id="np-chip-title">—</span>
           </button>
+          <!-- Chip de PRs de los agentes (Hito 9): solo visible si hay PRs; el
+               número son los abiertos. Abre el modal de PRs. -->
+          <button class="pr-chip" id="pr-chip" type="button" hidden title="PRs de los agentes">
+            PR <span class="pr-chip__count" id="pr-chip-count">0</span>
+          </button>
           <div class="topbar__clock">
             <span id="clock">--:--</span> · <span id="online">ONLINE</span>
           </div>
@@ -201,6 +206,34 @@
           <p class="modal__q" id="modal-q"></p>
           <p class="modal__label">RESPUESTA</p>
           <p class="modal__a" id="modal-a"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal de PRs de los agentes: lista → detalle (descripción + diff) → fusionar. -->
+    <div class="modal" id="pr-modal" hidden>
+      <div class="modal__overlay" id="pr-overlay"></div>
+      <div class="modal__dialog modal__dialog--wide" role="dialog" aria-modal="true" aria-label="PRs de los agentes">
+        <header class="modal__head">
+          <button class="modal__action" id="pr-back" type="button" hidden>‹ LISTA</button>
+          <span class="modal__badge" id="pr-head">PRs DE LOS AGENTES</span>
+          <div class="modal__actions">
+            <button class="modal__action pr-discard" id="pr-discard" type="button" hidden>CERRAR PR</button>
+            <button class="modal__action pr-merge" id="pr-merge" type="button" hidden>FUSIONAR</button>
+            <button class="modal__close" id="pr-close" aria-label="Cerrar">×</button>
+          </div>
+        </header>
+        <div class="modal__body">
+          <ul class="pr-list" id="pr-list"></ul>
+          <div class="pr-detail" id="pr-detail" hidden>
+            <p class="modal__q" id="pr-title"></p>
+            <p class="pr-meta" id="pr-meta"></p>
+            <p class="pr-msg" id="pr-msg" hidden></p>
+            <p class="modal__label">DESCRIPCIÓN</p>
+            <p class="modal__a" id="pr-body"></p>
+            <p class="modal__label">CAMBIOS</p>
+            <pre class="pr-diff" id="pr-diff"></pre>
+          </div>
         </div>
       </div>
     </div>
