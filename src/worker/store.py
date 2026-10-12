@@ -48,8 +48,9 @@ _PHASE2_COLUMNS = {
     "pr_status": "TEXT",           # None (sin PR) · open · merged · closed
     "pr_title": "TEXT",
     "pr_body": "TEXT",
-    "pr_tests_passed": "INTEGER",  # 1/0/None (sin tests o sin informar)
+    "pr_tests_passed": "INTEGER",  # 1/0/None: lo fija el runner al ejecutar la suite (Fase 6)
     "pr_tests_output": "TEXT",
+    "pr_tests_sha": "TEXT",        # commit sobre el que se ejecutó la suite: un verde viejo no vale
     "pr_diffstat": "TEXT",
     "handoff": "TEXT",             # ritual de cierre (estado para retomar en frío)
     "idle_warned": "INTEGER DEFAULT 0",

@@ -47,7 +47,8 @@ from claude_agent_sdk import (
 )
 
 from src.worker import usage as usage_probe
-from src.worker.prs import LocalPRProvider, PRProvider, commits_ahead, git
+from src.worker.settings import Hot
+from src.worker.prs import LocalPRProvider, PRProvider, commits_ahead, git, run_suite
 from src.worker.store import AgentStore
 from src.worker.tools import build_agent_server
 
@@ -66,7 +67,11 @@ _REAP_INTERVAL = 30.0
 _COMMON_RULES = """\
 Eres un agente de Jarvis, el asistente personal del usuario, y trabajas en segundo plano en el repositorio de tu \
 directorio actual. Si de verdad no puedes decidir algo razonablemente, usa la herramienta ask; si no, decide y deja \
-claros tus supuestos. Si te mandan un mensaje de seguimiento, contesta a eso."""
+claros tus supuestos. Si te mandan un mensaje de seguimiento, contesta a eso.
+- Ejecuta el encargo, no investigues: lee solo los ficheros que nombra y los imprescindibles para \
+tocarlos; nada de explorar el repo ni releer lo que ya has leído. Lee varios ficheros a la vez cuando puedas.
+- Escribe telegráfico (preguntas, descripción del PR, respuestas): lo esencial, sin preámbulos, sin \
+repetir el encargo ni narrar lo que vas haciendo. El código y los mensajes de commit, normales."""
 
 _READ_RULES = """
 MODO SOLO LECTURA: puedes leer el código y buscar en la web, pero no modificar nada.
@@ -77,16 +82,30 @@ _CODE_RULES = """
 MODO CÓDIGO: trabajas en la rama {branch} (ya creada y activa; rama base: {base}).
 - Cambios pequeños y enfocados en la tarea; sigue tus CLAUDE.md (el de usuario y el del proyecto, si los hay).
 - Prohibido inventar contratos: si necesitas un dato que no está en el encargo ni en el repo (campos de una API, nombres de variables de entorno, formato de un fichero…), pregúntalo con ask en vez de suponerlo. Las variables de entorno, con el nombre exacto del .env.example.
-- Si el proyecto tiene tests, ejecútalos y déjalos en verde (si necesitas dependencias, crea un entorno virtual en \
-.venv y no lo commitees). Tests nuevos solo si el encargo o tu CLAUDE.md lo piden.
+- No ejecutes la suite de tests: al terminar tu turno el sistema la ejecuta sobre tu último commit y, si falla, te \
+devuelve la salida. Si necesitas dependencias, el entorno virtual va en .venv (no lo commitees). No escribas tests \
+salvo que el encargo lo pida; entonces, uno mínimo sumado a la suite existente, nunca un fichero grande.
+- No edites el PLAN.md (ni para marcar tu casilla): lo actualiza el gestor. No tomes decisiones de diseño (variables \
+nuevas, precedencias, contratos…): si falta una, pregúntala con ask; si crees que el plan debe cambiar, dilo en la \
+descripción del PR.
 - Haz commit de tu trabajo siguiendo la convención de tu CLAUDE.md (si no hay, mensajes claros). NO hagas push ni \
 cambies de rama: el sistema empuja tu rama.
-- Al terminar, llama a submit_pr con título, descripción y resultado de los tests. Después responde con un resumen \
+- Al terminar, llama a submit_pr con título y descripción. Después responde con un resumen \
 breve en español (como máximo 10 líneas), sin tablas."""
+
+# Suite en rojo tras un turno: lo manda el runner como mensaje del siguiente turno.
+_MAX_RED_FIXES = 2
+_SUITE_RED = """\
+El sistema ha ejecutado la suite de tests sobre tu último commit y falla. Si fallan tests que no has escrito tú, \
+tu cambio ha roto algo que ya funcionaba: arregla tu código y no toques esos tests. Para entender el fallo puedes \
+ejecutar solo el test que falla; la suite completa la vuelve a pasar el sistema. Haz commit del arreglo y termina.
+
+Final de la salida:
+{output}"""
 
 _HANDOFF_CODE = """\
 RITUAL DE CIERRE: esta sesión se va a cerrar {why}. Escribe (o actualiza) el fichero `{branch}.md` en la \
-raíz del repo con: qué se pidió, qué has hecho, estado actual (tests incluidos), qué falta y cómo retomarlo en frío \
+raíz del repo con: qué se pidió, qué has hecho, estado actual, qué falta y cómo retomarlo en frío \
 sin esta conversación. Haz commit de ese fichero (sin push). Responde solo con un resumen de ese handoff en 5 líneas."""
 
 _HANDOFF_READ = """\
@@ -117,7 +136,7 @@ y sigue lo que te diga."""
 _TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 # (e2) Filas de métricas separadas por más de esto (s) son tandas distintas: el hueco entre
-# ellas (tu uso, otro día) no se atribuye a los agentes.
+# ellas (otro uso de la cuenta, otro día) no se atribuye a los agentes.
 _METRICS_GAP = 1800.0
 
 
@@ -177,9 +196,11 @@ class AgentManager:
         store: Persistencia de estados.
         git_root: Carpeta con los bare repos (``<repo>.git``).
         work_root: Carpeta donde se clona cada agente.
-        allowed_repos: Repos que los agentes pueden usar (lista blanca).
+        allowed_repos: Repos que los agentes pueden usar (lista blanca). None = los bare que
+            haya en ``git_root`` en cada momento (alta y baja en caliente, bloque 5).
         max_working: Agentes trabajando a la vez.
         model: Modelo de los agentes.
+        effort: Esfuerzo de razonamiento de los agentes (low, medium, high…).
         idle_warn: Segundos en ``idle`` hasta el aviso.
         handoff_at: Segundos en ``idle`` hasta el ritual de cierre.
         idle_ttl: Segundos en ``idle`` hasta cerrar la sesión.
@@ -207,16 +228,35 @@ class AgentManager:
             existe, los agentes solo cargan el CLAUDE.md del proyecto.
         checkpoint: (f) Subida de la ventana de 5 h (0–1) durante un turno que dispara
             un punto de control. 0 = apagado.
+
+    Los atributos ``Hot`` (bloque 5) guardan el valor del entorno y devuelven el de
+    ``settings.json`` si se cambió en caliente desde la web.
     """
+
+    max_working = Hot("JARVIS_AGENTS_MAX")
+    model = Hot("JARVIS_AGENT_MODEL")
+    effort = Hot("JARVIS_AGENT_EFFORT")
+    idle_warn = Hot("JARVIS_AGENT_IDLE_WARN")
+    handoff_at = Hot("JARVIS_AGENT_HANDOFF_AT")
+    idle_ttl = Hot("JARVIS_AGENT_IDLE_TTL")
+    turn_timeout = Hot("JARVIS_AGENT_TURN_TIMEOUT")
+    manager_timeout = Hot("JARVIS_AGENT_MANAGER_TIMEOUT")
+    manager_first = Hot("JARVIS_AGENT_ASK_MANAGER_FIRST")
+    usage_limit = Hot("JARVIS_AGENT_USAGE_LIMIT")
+    usage_limit_7d = Hot("JARVIS_AGENT_USAGE_LIMIT_7D")
+    usage_mode = Hot("JARVIS_AGENT_USAGE_MODE")
+    probe_every = Hot("JARVIS_USAGE_PROBE_EVERY")
+    checkpoint = Hot("JARVIS_AGENT_CHECKPOINT")
 
     def __init__(
         self,
         store: AgentStore,
         git_root: Path,
         work_root: Path,
-        allowed_repos: list[str],
+        allowed_repos: list[str] | None = None,
         max_working: int = 2,
         model: str = "claude-sonnet-4-6",
+        effort: str = "low",
         idle_warn: float = 2100,
         handoff_at: float = 2700,
         idle_ttl: float = 3300,
@@ -243,9 +283,12 @@ class AgentManager:
         self.checkpoint = checkpoint
         self.git_root = git_root
         self.work_root = work_root
-        self.allowed_repos = allowed_repos
+        self._allowed_repos = allowed_repos
         self.max_working = max_working
         self.model = model
+        # Esfuerzo bajo: los agentes ejecutan un encargo ya decidido, no investigan;
+        # el razonamiento cuenta como salida y se relee en cada vuelta.
+        self.effort = effort
         self.idle_warn = idle_warn
         self.handoff_at = handoff_at
         self.idle_ttl = idle_ttl
@@ -262,9 +305,10 @@ class AgentManager:
         self.base_branch = base_branch
         self.config_repo = config_repo
         # Huecos de trabajo. Se gestionan a mano (no `async with`) porque un agente
-        # que pregunta suelta el suyo y lo recupera al recibir la respuesta.
-        self._slots = asyncio.Semaphore(max_working)
+        # que pregunta suelta el suyo y lo recupera al recibir la respuesta. Limitador
+        # propio y no Semaphore: el tope (max_working) se puede cambiar en caliente.
         self._holding: set[str] = set()
+        self._slot_free = asyncio.Event()
         self._clients: dict[str, ClaudeSDKClient] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         # Mensajes recibidos mientras el agente trabajaba: se procesan al acabar el turno.
@@ -277,6 +321,8 @@ class AgentManager:
         self._session_cost: dict[str, float] = {}
         # Datos de PR que el agente dejó con submit_pr en el turno en curso.
         self._pr_requests: dict[str, dict] = {}
+        # Turnos automáticos de arreglo enviados por suite en rojo (se reinicia en verde).
+        self._red_fixes: dict[str, int] = {}
         # Último estado de uso visto por ventana (five_hour, seven_day…). Con token, de
         # la sonda (usage.py); sin él, de los RateLimitEvent del CLI. Alimenta la
         # salvaguarda y GET /usage.
@@ -645,16 +691,36 @@ class AgentManager:
         task = self._tasks.get(agent_id)
         return bool(task and not task.done())
 
+    @property
+    def allowed_repos(self) -> list[str]:
+        """Repos permitidos: la lista fija si se dio; si no, los bare de ``git_root`` ahora."""
+        if self._allowed_repos is not None:
+            return self._allowed_repos
+        try:
+            return sorted(p.name.removesuffix(".git") for p in self.git_root.glob("*.git") if p.is_dir())
+        except OSError:
+            return []
+
     async def _acquire(self, agent_id: str) -> None:
-        """Toma un hueco de trabajo para el agente."""
-        await self._slots.acquire()
+        """Toma un hueco de trabajo para el agente.
+
+        Con el tope lleno espera a que se suelte uno; además mira cada pocos segundos por si
+        se subió ``max_working`` en caliente. Al bajarlo no se corta a nadie: los que trabajan
+        acaban y los nuevos esperan. Comprobar y apuntar van sin ``await`` entre medias.
+        """
+        while len(self._holding) >= self.max_working:
+            self._slot_free.clear()
+            try:
+                await asyncio.wait_for(self._slot_free.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
         self._holding.add(agent_id)
 
     def _release(self, agent_id: str) -> None:
         """Suelta el hueco del agente, si lo tiene (idempotente)."""
         if agent_id in self._holding:
             self._holding.discard(agent_id)
-            self._slots.release()
+            self._slot_free.set()
 
     async def _run(
         self, agent_id: str, prompt: str | None = None, first: bool = False, cold: bool = False
@@ -695,7 +761,8 @@ class AgentManager:
                     text=prompt,
                 )
             await self._turn(agent_id, prompt)
-            await self._publish_pr(agent_id)
+            if await self._publish_pr(agent_id):
+                self._send_red_suite(agent_id)
         except asyncio.CancelledError:
             raise
         except RateLimited as exc:
@@ -860,7 +927,7 @@ class AgentManager:
         """(f) ¿Toca punto de control? La ventana subió ``checkpoint`` desde ``base``.
 
         Nunca en el handoff (es el cierre de la sesión). Mide la ventana real, así que el
-        uso del usuario en paralelo también cuenta: es lo que importa para los límites.
+        uso en paralelo de la misma cuenta también cuenta: es lo que importa para los límites.
         """
         now = self._five_hour()
         if self.checkpoint <= 0 or substate == "handoff" or base is None or now is None:
@@ -882,8 +949,8 @@ class AgentManager:
         Los tokens son la medida buena (con muestras se extrapola cuánto % sube la ventana
         cada X tokens); el $ es una estimación del CLI y se guarda solo como referencia.
         Sin sondas extra: el "después" es la última lectura, refrescada solo si tiene más de
-        ``probe_every`` s. El uso propio del usuario en paralelo ensucia el delta: vale como
-        estimación, se afina con muchas muestras.
+        ``probe_every`` s. Lo que gaste en paralelo la misma cuenta (Vision, la conversación con
+        Jarvis…) ensucia el delta: vale como estimación, se afina con muchas muestras.
         """
         if not self.metrics_path:
             return
@@ -931,19 +998,49 @@ class AgentManager:
             summary[f"{window}_pct_per_usd"] = round(moved * 100 / cost, 2) if cost else None
         return {"summary": summary, "rows": rows[-last:]}
 
-    async def _publish_pr(self, agent_id: str) -> None:
-        """Modo código: si hay commits nuevos, empuja la rama y actualiza el PR."""
+    async def _publish_pr(self, agent_id: str) -> bool:
+        """Modo código: si hay commits, empuja la rama, actualiza el PR y pasa la suite.
+
+        La suite la ejecuta el runner (cero tokens) cada vez que cambia la punta de la
+        rama; el verde queda ligado a ese commit (``pr_tests_sha``) para que un verde
+        viejo no valga tras un commit nuevo.
+
+        Returns:
+            True si la suite acaba de fallar sobre un commit nuevo.
+        """
         agent = self.store.get(agent_id)
         request = self._pr_requests.pop(agent_id, {})
         if agent["mode"] != "code":
-            return
+            return False
         workdir = self.work_root / agent_id
         ahead = await asyncio.to_thread(commits_ahead, workdir, agent["base_branch"])
         if not ahead:
-            return
+            return False
         self.store.update(agent_id, substate="pushing")
         fields = await asyncio.to_thread(self.prs.publish, workdir, agent, request)
         self.store.update(agent_id, **fields)
+        head = await asyncio.to_thread(git, workdir, "rev-parse", "HEAD")
+        if head == agent.get("pr_tests_sha"):
+            return False
+        self.store.update(agent_id, substate="testing")
+        passed, output = await asyncio.to_thread(run_suite, workdir)
+        self.store.update(agent_id, pr_tests_passed=passed, pr_tests_output=output, pr_tests_sha=head)
+        if passed:
+            self._red_fixes.pop(agent_id, None)
+        return not passed
+
+    def _send_red_suite(self, agent_id: str) -> None:
+        """Suite en rojo: se la devuelve al agente en el siguiente turno, con tope de intentos.
+
+        Agotado el tope, el agente queda en ``idle`` con el PR en rojo y decide el gestor.
+        """
+        tries = self._red_fixes.get(agent_id, 0)
+        if tries >= _MAX_RED_FIXES:
+            log.warning("Agente %s: suite en rojo tras %d arreglos; decide el gestor", agent_id, tries)
+            return
+        self._red_fixes[agent_id] = tries + 1
+        output = self.store.get(agent_id)["pr_tests_output"] or ""
+        self._pending.setdefault(agent_id, []).append(_SUITE_RED.format(output=output[-2000:]))
 
     async def _open_client(self, agent_id: str, agent: dict, workdir: Path) -> None:
         """Abre la sesión del CLI de un agente con las opciones de su modo."""
@@ -957,6 +1054,7 @@ class AgentManager:
         await asyncio.to_thread(self._sync_agent_config)
         client = ClaudeSDKClient(options=ClaudeAgentOptions(
             model=self.model,
+            effort=self.effort,
             cwd=str(workdir),
             tools=list(builtin),
             allowed_tools=list(builtin) + tool_names,
@@ -1168,16 +1266,15 @@ class AgentManager:
 def manager_from_env() -> AgentManager:
     """Construye el gestor a partir de las variables de entorno del worker."""
     data = Path(os.getenv("JARVIS_WORKER_DATA", "/data"))
-    repos = [r.strip() for r in os.getenv("JARVIS_AGENT_REPOS", "").split(",") if r.strip()]
     env = os.getenv
     return AgentManager(
         store=AgentStore(data / "agents.sqlite"),
         metrics_path=data / "turn_metrics.jsonl",
         git_root=Path(env("JARVIS_AGENT_GIT_ROOT", "/repos")),
         work_root=data / "work",
-        allowed_repos=repos,
         max_working=int(env("JARVIS_AGENTS_MAX", "2")),
         model=env("JARVIS_AGENT_MODEL", "claude-sonnet-4-6"),
+        effort=env("JARVIS_AGENT_EFFORT", "") or "low",
         idle_warn=float(env("JARVIS_AGENT_IDLE_WARN", "2100")),
         handoff_at=float(env("JARVIS_AGENT_HANDOFF_AT", "2700")),
         idle_ttl=float(env("JARVIS_AGENT_IDLE_TTL", "3300")),

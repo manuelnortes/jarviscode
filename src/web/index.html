@@ -56,6 +56,9 @@
           <button class="pr-chip" id="pr-chip" type="button" hidden title="PRs de los agentes">
             PR <span class="pr-chip__count" id="pr-chip-count">0</span>
           </button>
+          <!-- Ajustes en caliente del worker y de Vision (Hito 9, Fase 6): solo si hay agentes. -->
+          <button class="pr-chip set-chip" id="set-chip" type="button" hidden title="Ajustes de agentes y Vision"
+                  aria-label="Ajustes">⚙</button>
           <div class="topbar__clock">
             <span id="clock">--:--</span> · <span id="online">ONLINE</span>
           </div>
@@ -234,6 +237,29 @@
             <p class="modal__label">CAMBIOS</p>
             <pre class="pr-diff" id="pr-diff"></pre>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal de ajustes en caliente: valor efectivo, origen y cuándo se aplica. -->
+    <div class="modal" id="set-modal" hidden>
+      <div class="modal__overlay" id="set-overlay"></div>
+      <div class="modal__dialog modal__dialog--wide" role="dialog" aria-modal="true" aria-label="Ajustes">
+        <header class="modal__head">
+          <span class="modal__badge">AJUSTES · AGENTES Y VISION</span>
+          <div class="modal__actions">
+            <button class="modal__action pr-merge" id="set-save" type="button">GUARDAR</button>
+            <button class="modal__close" id="set-close" aria-label="Cerrar">×</button>
+          </div>
+        </header>
+        <div class="modal__body">
+          <p class="pr-msg" id="set-msg" hidden></p>
+          <!-- Uso de la suscripción (sonda Haiku del worker): una barra por ventana. -->
+          <p class="modal__label">USO DE LA SUSCRIPCIÓN</p>
+          <div id="set-usage"><p class="pr-meta">—</p></div>
+          <div id="set-groups"></div>
+          <p class="modal__label">REPOS PERMITIDOS</p>
+          <p class="pr-meta" id="set-repos">—</p>
         </div>
       </div>
     </div>

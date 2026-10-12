@@ -14,8 +14,9 @@
 #
 # Uso (como root en el servidor git):
 #   scripts/agent_repo_setup.sh /ruta/a/repo.git [UID]
-# Es idempotente. Después, monta el bare SIN :ro en el servicio jarvis-worker y
-# añade el repo a JARVIS_AGENT_REPOS.
+# Es idempotente. Después, engánchalo en la carpeta de los agentes (JARVIS_AGENT_REPOS_DIR):
+#   mkdir -p <dir>/repo.git && mount --bind /ruta/a/repo.git <dir>/repo.git
+# (y una línea en /etc/fstab para que sobreviva a reinicios). Aparece en caliente.
 
 set -euo pipefail
 

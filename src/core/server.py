@@ -26,12 +26,14 @@ recicla su `JarvisCore` para volver a Haiku sin recargar — por mensaje de cont
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
@@ -42,6 +44,7 @@ from src.capabilities import agents, prs
 from src.core.jarvis import JarvisConfig, JarvisCore, active_capabilities
 from src.core.session import FAREWELL, is_closing
 from src.core.voice_ws import get_models_async, voice_endpoint
+from src.worker import settings
 
 # Directorio del frontend web (UI de voz, Hito 3.6). Se sirve estático.
 _WEB_DIR = Path(__file__).resolve().parents[1] / "web"
@@ -108,7 +111,41 @@ async def _preload_voice_models() -> None:
         logging.getLogger("jarvis").exception("Fallo precargando los modelos de voz.")
 
 
+class BlockSubnetMiddleware:
+    """Rechaza HTTP y WebSocket que vengan de la red del worker de agentes.
+
+    El núcleo es host-net y sin auth propia (Authelia solo protege lo que entra por
+    NPM), así que un agente con Bash podría llamar a /vision/message, a la fusión de
+    PRs o hablar con Jarvis por /ws. Se filtra por la IP de origen: uvicorn solo se
+    fía de X-Forwarded-For si viene de 127.0.0.1, así que el agente no puede falsearla.
+    """
+
+    def __init__(self, app, subnet: str) -> None:
+        self.app = app
+        self.network = ipaddress.ip_network(subnet, strict=False) if subnet else None
+
+    def _blocked(self, scope) -> bool:
+        client = scope.get("client")
+        if self.network is None or not client:
+            return False
+        try:
+            return ipaddress.ip_address(client[0]) in self.network
+        except ValueError:
+            return False
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket") and self._blocked(scope):
+            logging.getLogger("jarvis").warning("Petición rechazada desde la red del worker: %s", scope["client"][0])
+            if scope["type"] == "http":
+                await Response("Prohibido desde la red de los agentes.", status_code=403)(scope, receive, send)
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Jarvis Core API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(BlockSubnetMiddleware, subnet=os.getenv("JARVIS_WORKER_SUBNET", "").strip())
 
 
 @app.get("/agents")
@@ -158,6 +195,89 @@ async def close_pr(agent_id: str) -> dict:
         return await prs.close(agent_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# ── Métricas (Hito 9, Fase 6, bloque 6): agentes + Vision y coste por tarea, en tokens ──
+@app.get("/api/metrics")
+async def get_metrics(tasks: int = 20, last: int = 20) -> dict:
+    """Resumen de gasto en tokens: agentes, Vision y por tarea (ver ``src/vision/metrics.py``).
+
+    Args:
+        tasks: Tareas (agentes) a devolver, las más recientes primero.
+        last: Últimas filas de Vision en crudo.
+    """
+    from src.vision import metrics as vision_metrics
+
+    if not agents.is_enabled():
+        raise HTTPException(status_code=503, detail="No hay worker de agentes configurado.")
+    try:
+        # Todas las filas del worker: el resumen por tarea necesita la historia entera.
+        worker = await agents._call("GET", "/metrics", params={"last": 1_000_000})
+        agent_list = await agents.list_agents()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return vision_metrics.summarize(worker, agent_list, vision_metrics.load(), tasks, last)
+
+
+@app.get("/api/usage")
+async def get_usage() -> dict:
+    """Uso de la suscripción (ventanas de 5 h y 7 d) para las barras del modal de ajustes.
+
+    Proxy de ``GET /usage`` del worker, que sondea con Haiku si la lectura es vieja
+    (como mucho una llamada de 1 token cada ``probe_every`` s, abra quien abra el modal).
+    """
+    if not agents.is_enabled():
+        raise HTTPException(status_code=503, detail="No hay worker de agentes configurado.")
+    try:
+        return await agents._call("GET", "/usage")
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+# ── Ajustes en caliente (Hito 9, Fase 6, bloque 5): modal de la web ──────────
+# Los del worker los describe el propio worker (su entorno es otro); los escribe solo el
+# núcleo, en settings.json (volumen jarvis-settings, que el worker monta de solo lectura).
+async def _settings_view() -> tuple[list[dict], list[str] | None]:
+    """Ajustes del worker y del núcleo, y repos permitidos (None = worker inaccesible)."""
+    items, repos = [], None
+    if agents.is_enabled():
+        try:
+            items = await agents._call("GET", "/settings")
+            repos = await agents._call("GET", "/repos")
+        except (httpx.HTTPError, RuntimeError):
+            logging.getLogger("jarvis").warning("Ajustes: el worker no responde; solo los del núcleo")
+    return items + settings.describe("core"), repos
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict:
+    """Ajustes editables con su valor efectivo, origen y cuándo se aplican."""
+    items, repos = await _settings_view()
+    return {"settings": items, "repos": repos}
+
+
+@app.put("/api/settings")
+async def put_settings(payload: dict) -> dict:
+    """Cambia ajustes en caliente: ``{CLAVE: valor | null}`` (``null`` = volver al entorno).
+
+    Todo o nada: con un error en cualquier clave no se aplica ninguna (422 con el error
+    de cada una). Cada cambio aplicado deja una línea de auditoría (viejo → nuevo).
+    """
+    if not isinstance(payload, dict) or not payload:
+        raise HTTPException(status_code=400, detail="Manda {CLAVE: valor | null}.")
+    items, _ = await _settings_view()
+    current = {i["key"]: i["value"] for i in items}
+    unreachable = [k for k in payload if k in settings.REGISTRY and k not in current]
+    if unreachable:
+        raise HTTPException(status_code=503, detail=f"El worker no responde: no puedo validar {', '.join(unreachable)}.")
+    old = settings.hot().overrides()
+    new, errors = settings.validate(payload, current)
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+    settings.hot().write(new)
+    settings.audit(settings.hot().path.with_name("audit.jsonl"), old, new)
+    items, repos = await _settings_view()
+    return {"settings": items, "repos": repos}
 
 
 # ── Hablar con Vision (Hito 9, Fase 5): Vision es el único gestor de los agentes ──

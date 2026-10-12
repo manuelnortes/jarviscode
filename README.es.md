@@ -149,15 +149,16 @@ agente es una sesión de Claude Code (Sonnet por defecto) sobre su propio clon d
 Dos modos:
 
 - **read**: el agente lee el código y busca en la web, y después informa.
-- **code**: el agente trabaja en su propia rama `agent/<id>-<slug>`, pasa los tests y hace commits;
-  el runner empuja **solo esa rama** y abre un **pull request ligero** (título, descripción, diffstat,
-  resultado de los tests). Los agentes de código salen de una **rama de integración** (`develop`, que
+- **code**: el agente trabaja en su propia rama `agent/<id>-<slug>` y hace commits; el runner empuja
+  **solo esa rama**, ejecuta él la suite de tests del proyecto (sin gastar tokens) y abre un **pull
+  request ligero** (título, descripción, diffstat, resultado de los tests ligado a ese commit). Los agentes de código salen de una **rama de integración** (`develop`, que
   se crea y se pone al día con la principal sola); a la rama principal no llega nada sin ti.
 
 **Vision** es el gestor ([docs/vision.es.md](docs/vision.es.md)): revisa cada PR terminado contra el
 `PLAN.md` del proyecto y lo fusiona en `develop`, pide cambios al agente o te lo pasa, y después lanza
 el siguiente punto del plan (un punto por agente). `develop` → principal lo revisas tú. La fusión está
-protegida en el código: solo en la rama de integración y solo con los tests en verde. También puedes
+protegida en el código: solo en la rama de integración y solo con la suite en verde sobre la punta actual de la rama.
+Los agentes no editan el `PLAN.md` (lo mantiene Vision en `develop`) ni añaden tests salvo que Vision lo pida. También puedes
 fusionar o cerrar un PR desde el panel **PRs** de la web (con su diff completo) o pidiéndoselo a Jarvis.
 
 Los agentes pueden **preguntar** mientras trabajan: las preguntas van primero a Vision, que responde
@@ -170,22 +171,31 @@ seguir. A los 35 minutos recibes un aviso; a los 45 escribe un **handoff** (en m
 fichero con el nombre de su rama, `agent/<id>-<slug>.md`, commiteado en la rama) y a los 55 se
 cierra la sesión. Si le escribes después, retoma desde el handoff en una sesión nueva.
 
-**Uso**: agentes, Vision y tú compartís la misma suscripción. El worker lee el uso real (una sonda de
+**Uso**: agentes, Vision y Jarvis gastan de la cuenta de Claude del token que configures (y tus
+propias sesiones de Claude también, si usas la misma cuenta). El worker lee el uso real (una sonda de
 1 token a Haiku mientras hay agentes) y, al llegar a `JARVIS_AGENT_USAGE_LIMIT`, no lanza nada y pausa
 los agentes tras guardar su trabajo (handoff); se retoman cuando lo dices, o solos al reiniciarse la
 ventana (`JARVIS_AGENT_USAGE_MODE=autonomous`). Cada +5 % de la ventana de 5 h durante un turno
 (`JARVIS_AGENT_CHECKPOINT`) el agente para, estima lo que le falta y pide a Vision que le recorte el
-alcance si hace falta. `GET /metrics` en el worker da coste, tokens y uso por turno.
+alcance si hace falta. `GET /api/metrics` en el núcleo da el gasto en tokens de agentes y Vision, por tarea
+(lanzamiento, turnos del agente, revisión y fusión) y por turno.
 
 1. En el `.env`: `JARVIS_AGENTS_URL=http://127.0.0.1:8113`, un `JARVIS_WORKER_TOKEN` aleatorio y
-   `JARVIS_AGENT_REPOS=<repo>[,<repo>…]`.
-2. En `docker-compose.override.yml`, monta cada bare repo permitido en `/repos/<repo>.git` para el
-   servicio `jarvis-worker` (ver `docker-compose.override.example.yml`).
-   Para el modo **code**, móntalo con escritura y ejecuta antes, como root en el servidor git,
-   `scripts/agent_repo_setup.sh <repo>.git`: da escritura al usuario del worker solo donde git la
+   `JARVIS_AGENT_REPOS_DIR` (por defecto `./agent-repos`).
+2. Los repos permitidos son los bare que haya en `JARVIS_AGENT_REPOS_DIR`: el compose monta esa carpeta
+   en `/repos` en el worker y en el núcleo (que fusiona ahí los PR), con propagación de montajes, así que
+   dar uno de alta no pide reiniciar. Para cada repo, ejecuta antes, como root en el servidor git,
+   `scripts/agent_repo_setup.sh <repo>.git` (da escritura al usuario del worker solo donde git la
    necesita e instala un hook `pre-receive` que rechaza cualquier push de ese usuario fuera de las
-   ramas `agent/*`.
+   ramas `agent/*`) y después `mount --bind /ruta/a/<repo>.git <JARVIS_AGENT_REPOS_DIR>/<repo>.git`
+   (más una línea en `/etc/fstab`). Para darlo de baja, desmóntalo.
 3. `docker compose --profile agents up -d --build jarvis-worker` y después reconstruye el núcleo.
+
+**Ajustes en caliente:** el botón ⚙ de la web cambia sin reiniciar la mayoría de las variables de abajo
+(agentes a la vez, modelos, esfuerzos, ciclo del idle, límites de uso hasta el 95 %, puntos de control,
+ciclo de Vision…). El cambio manda sobre el `.env` hasta que lo restableces; se guarda en el volumen
+`jarvis-settings` (`settings.json`, con un `audit.jsonl` de valor viejo → nuevo). API: `GET`/`PUT
+/api/settings` (`{"CLAVE": valor | null}`, todo o nada; `null` vuelve al `.env`).
 
 | Variable | Por defecto | Para qué |
 |---|---|---|
@@ -194,7 +204,7 @@ alcance si hace falta. `GET /metrics` en el worker da coste, tokens y uso por tu
 | `JARVIS_AGENT_IDLE_WARN` / `_HANDOFF_AT` / `_IDLE_TTL` | `2100` / `2700` / `3300` | Ciclo del idle (s): aviso, handoff, cierre de la sesión |
 | `JARVIS_AGENT_MANAGER_TIMEOUT` | `900` | Segundos que una pregunta espera al gestor antes de pasar a ti |
 | `JARVIS_AGENT_TURN_TIMEOUT` | `1800` | Máximo de segundos trabajando por turno (esperar una respuesta no cuenta) |
-| `JARVIS_AGENT_USAGE_LIMIT` / `_7D` | `60` / `75` | Salvaguarda (%) de la ventana de 5 h / semanal (tu propio uso de Claude incluido): no arrancan agentes y los que trabajan se pausan tras un handoff |
+| `JARVIS_AGENT_USAGE_LIMIT` / `_7D` | `60` / `75` | Salvaguarda (%) de la ventana de 5 h / semanal (cuenta todo lo que gaste esa cuenta): no arrancan agentes y los que trabajan se pausan tras un handoff |
 | `JARVIS_INTEGRATION_BRANCH` | `develop` | Rama donde se fusiona el trabajo autónomo; vacía = desactivada |
 | `JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS` | `3600` | Timeout de la sesión de voz mientras gestiona agentes vivos (en vez de 90 s) |
 | `JARVIS_WORKER_MEM_LIMIT` | `4g` | Tope de RAM del worker (~0,35 GB por sesión de agente viva) |

@@ -22,6 +22,9 @@ services:
       # sin tocar este fichero; el healthcheck y el satélite usan el mismo valor.
       JARVIS_HOST: 0.0.0.0
       JARVIS_PORT: ${JARVIS_PORT:-8200}
+      # La API rechaza lo que venga de la red del worker: los agentes tienen Bash y
+      # podrían llamarla (fusionar PRs, hablar con Vision). Misma subred que abajo.
+      JARVIS_WORKER_SUBNET: ${JARVIS_WORKER_SUBNET:-172.31.0.0/16}
       # STT server-side (CPU i7-8809G = 4 núcleos / 8 hilos, sin GPU).
       # Historial: `small` → `medium` (2026-06-25, mejor calidad ES, coste CPU
       # asumible) → `large-v3-turbo` (2026-07-02, prueba) → `medium` (2026-07-02,
@@ -41,11 +44,25 @@ services:
       # Token cacheado de Spotify, en el volumen persistente (jarvis-data). El
       # fichero se genera en local con scripts/spotify_auth.py y se copia aquí.
       SPOTIFY_CACHE: /app/data/spotify-cache
+      # El núcleo fusiona los PR y edita el plan sobre los bare de los agentes.
+      JARVIS_AGENT_GIT_ROOT: /repos
     volumes:
       # Persiste el modelo Whisper descargado entre rebuilds (~1.5 GB para medium).
       - jarvis-models:/app/cache
       # Persiste datos de capacidades (BD de recordatorios; cache de Spotify futura).
       - jarvis-data:/app/data
+      # Ajustes en caliente desde la web (settings.json): el núcleo los escribe.
+      - jarvis-settings:/settings
+      # Repos de los agentes (Fase 6, bloque 5): carpeta del host con un bare por repo
+      # permitido (en el homelab, /opt/git-agents con un `mount --bind` por repo). Lo que
+      # haya dentro ES la lista blanca; rslave hace que un bind nuevo en el host aparezca
+      # dentro sin reiniciar. Misma ruta (/repos) en el worker y en el núcleo.
+      - type: bind
+        source: ${JARVIS_AGENT_REPOS_DIR:-./agent-repos}
+        target: /repos
+        bind:
+          propagation: rslave
+          create_host_path: true
     # Tope de RAM del contenedor. Sin él, cargar Whisper en un host justo de
     # memoria no provoca un OOM limpio sino thrashing que congela la máquina entera
     # (incidente 2026-10-06: dos Whisper medium a la vez colgaron el LXC). Con el
@@ -84,6 +101,9 @@ services:
     network_mode: host          # habla al núcleo por 127.0.0.1:JARVIS_PORT (host-net)
     # Fase 3: servicio permanente (modo `run`, wake word) → se reinicia solo.
     restart: unless-stopped
+    # Fuera del `up -d` por defecto (2026-10-11): arrancar a mano con
+    #   docker compose --profile satellite up -d jarvis-satellite
+    profiles: ["satellite"]
     depends_on:
       - jarvis
     devices:
@@ -117,8 +137,7 @@ services:
   # Worker de agentes (Hito 9): ejecuta agentes de Claude en segundo plano,
   # aislado del núcleo. Opcional: perfil "agents" →
   #   docker compose --profile agents up -d --build jarvis-worker
-  # Los bare repos permitidos se montan en /repos desde el
-  # docker-compose.override.yml (ver docker-compose.override.example.yml).
+  # Los repos permitidos son los bare de JARVIS_AGENT_REPOS_DIR (montado en /repos).
   jarvis-worker:
     build:
       context: .
@@ -131,7 +150,6 @@ services:
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       JARVIS_WORKER_TOKEN: ${JARVIS_WORKER_TOKEN:-}
-      JARVIS_AGENT_REPOS: ${JARVIS_AGENT_REPOS:-}
       JARVIS_AGENTS_MAX: ${JARVIS_AGENTS_MAX:-2}
       JARVIS_AGENT_MODEL: ${JARVIS_AGENT_MODEL:-claude-sonnet-4-6}
       # Ciclo del idle (s): aviso, ritual de cierre (handoff) y cierre de la sesión.
@@ -173,6 +191,18 @@ services:
       - "127.0.0.1:${JARVIS_WORKER_PORT:-8113}:8113"
     volumes:
       - jarvis-worker-data:/data
+      # Ajustes en caliente: solo lectura (los escribe el núcleo).
+      - jarvis-settings:/settings:ro
+      # Repos de los agentes (Fase 6, bloque 5): carpeta del host con un bare por repo
+      # permitido (en el homelab, /opt/git-agents con un `mount --bind` por repo). Lo que
+      # haya dentro ES la lista blanca; rslave hace que un bind nuevo en el host aparezca
+      # dentro sin reiniciar. Misma ruta (/repos) en el worker y en el núcleo.
+      - type: bind
+        source: ${JARVIS_AGENT_REPOS_DIR:-./agent-repos}
+        target: /repos
+        bind:
+          propagation: rslave
+          create_host_path: true
     # Cada agente es un proceso del CLI (~0,35 GB) más lo que ejecute (tests…).
     mem_limit: ${JARVIS_WORKER_MEM_LIMIT:-4g}
     memswap_limit: ${JARVIS_WORKER_MEM_LIMIT:-4g}
@@ -188,7 +218,16 @@ services:
         max-size: "10m"
         max-file: "5"
 
+# Red del worker (el núcleo y el satélite son host-net): subred fija para que el
+# núcleo sepa qué peticiones vienen de los agentes (JARVIS_WORKER_SUBNET).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${JARVIS_WORKER_SUBNET:-172.31.0.0/16}
+
 volumes:
   jarvis-models:
   jarvis-data:
   jarvis-worker-data:
+  jarvis-settings:

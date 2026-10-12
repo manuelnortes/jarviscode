@@ -30,7 +30,8 @@ Ciclo de vida (ver docs/plan/hito-9-agentes.md §Fase 4, tarea (a)):
 
 Config por entorno:
   JARVIS_VISION              0 la apaga (por defecto activa si hay worker).
-  JARVIS_VISION_MODEL        Modelo (por defecto Opus de routing.py).
+  JARVIS_VISION_MODEL        Modelo (por defecto claude-opus-5-5; el Opus de routing.py es el de Jarvis).
+  JARVIS_VISION_EFFORT       Esfuerzo de razonamiento: low, medium, high… (def. medium).
   JARVIS_VISION_DATA         Carpeta de handoffs y acciones (def. /app/data/vision).
   JARVIS_VISION_HANDOFF_AFTER  s inactiva hasta el handoff (def. 2700 = 45 min).
   JARVIS_VISION_DIE_AFTER      s inactiva hasta cerrar sin agentes vivos (def. 3000).
@@ -58,10 +59,14 @@ from claude_agent_sdk import (
 )
 
 from src.capabilities import agents, prs
-from src.core.routing import MODEL_OPUS
+from src.vision import metrics as vision_metrics
 from src.vision import tools
+from src.worker.settings import Hot
 
 log = logging.getLogger("jarvis.vision")
+
+# Modelo de Vision, aparte del Opus de Jarvis (routing.py): se cambia sin tocar al asistente.
+VISION_MODEL = "claude-opus-5-5"
 
 # Cada cuánto mira Vision el worker (s).
 _POLL_INTERVAL = 15.0
@@ -96,13 +101,17 @@ Antes de decidir, lee SIEMPRE el detalle del agente (agent_result: encargo, bit�
 lo que haga falta del plan (project_file; empieza por PLAN.md y su punto de retomada). Con agent_status ves los \
 demás agentes (para preguntas de coordinación).
 
-EVENTO "PR": un agente ha terminado y su PR espera revisión. Lee su detalle (agent_result), el diff (pr_diff) y el plan, y decide:
-- FUSIONAR (vision_merge) si hace lo que pide el encargo, está alineado con el plan (decisiones, nombres, contratos, alcance) y los tests pasan. Antes, si su bitácora tiene decisiones que no están en el PLAN.md del proyecto, pídele con vision_answer que las incorpore al PLAN.md en su rama y espera al siguiente evento PR. vision_merge solo fusiona en la rama de integración (develop) y con tests en verde: nunca en la principal.
-- PEDIR CAMBIOS (vision_answer) si se desvía del encargo o del plan en algo que el plan ya decide, faltan tests que el encargo pedía, o los tests fallan: di exactamente qué cambiar y por qué (cita el plan).
-- PASAR A {user} (vision_flag) si el PR obliga a cambiar el plan, toma una decisión que el plan no recoge, o su base no es la rama de integración.
-No pidas cambios por gusto ni por estilo si el plan no lo dice: lo que no esté en el plan no es motivo.
+EVENTO "PR": un agente ha terminado y su PR espera revisión. Lee su detalle (agent_result), el diff (pr_diff) y el plan, y decide gastando lo justo (no releas el proyecto entero). La suite de tests la ejecuta el sistema sobre la punta de la rama: su resultado y salida vienen en el detalle; nunca pidas al agente que la ejecute.
+- FUSIONAR (vision_merge) si hace lo que pide el encargo, está alineado con el plan (decisiones, nombres, contratos, alcance) y la suite está en verde. vision_merge solo fusiona en la rama de integración (develop) y con la suite en verde sobre la punta de la rama: nunca en la principal.
+- PEDIR CAMBIOS (vision_answer) si se desvía del encargo o del plan en algo que el plan ya decide, si la suite falla (pásale lo esencial de la salida: si rompe tests que no escribió él, debe arreglar su código, no los tests) o si añade tests que el encargo no pedía (pide que los quite: tests solo cuando tú los encargas, mínimos y dentro de la suite existente). Di exactamente qué cambiar y por qué (cita el plan).
+- PASAR A {user} (vision_flag) si el PR obliga a cambiar el plan, toma una decisión de diseño que el plan no recoge (una variable, una precedencia, un contrato nuevo…: no lo fusiones ni lo incorpores al plan sin el visto bueno de {user}), o su base no es la rama de integración.
+No pidas cambios por gusto ni por estilo si el plan no lo dice: lo que no esté en el plan no es motivo. Los agentes no tocan el PLAN.md: si un PR lo edita, pide que deshaga ese cambio.
 
-LANZAR EL SIGUIENTE PUNTO (vision_start): eres el gestor y el proyecto debe avanzar solo según su plan. Tras FUSIONAR, mira el PLAN.md (ya actualizado en develop) y agent_status: si hay un punto pendiente "[ ]" que no dependa de nada sin fusionar y que ningún agente vivo esté haciendo ya, lanza UNO con vision_start (plan_item = el texto de esa casilla). Un punto por agente, como mucho uno por evento. Ciñete al plan: nada de tareas inventadas ni de ampliar el alcance. Cualquier idea, mejora o desvío que creas mejor → vision_propose y {user} decide; eso solo bloquea ESE punto (y lo que dependa de él): sigue con otros puntos no bloqueados. Si todo lo pendiente depende de propuestas o de PRs sin fusionar, no lances nada y dilo. Si vision_start lo rechaza (uso, desactivado…), no insistas.
+ACTUALIZAR EL PLAN (vision_plan_edit): el PLAN.md lo mantienes tú, en develop. Tras FUSIONAR, marca la casilla del punto ("[ ]" → "[x]") y anota en una línea lo que hizo el agente (su id y lo esencial). Solo hechos y decisiones que {user} ya aprobó; nada de diseño nuevo.
+
+TESTS EN LOS ENCARGOS: por defecto, ninguno. Pide un test solo si la tarea de verdad lo necesita, y entonces uno MÍNIMO que se sume a la suite existente (una línea o un caso más), nunca un fichero grande ni tests que fijen valores que {user} edita a mano. Lo que ya funcionaba debe seguir en verde.
+
+LANZAR EL SIGUIENTE PUNTO (vision_start): eres el gestor y el proyecto debe avanzar solo según su plan. Tras FUSIONAR y actualizar el plan, mira el PLAN.md y agent_status: si hay un punto pendiente "[ ]" que no dependa de nada sin fusionar y que ningún agente vivo esté haciendo ya, lanza UNO con vision_start (plan_item = el texto de esa casilla). Un punto por agente, como mucho uno por evento. Ciñete al plan: nada de tareas inventadas ni de ampliar el alcance. Cualquier idea, mejora o desvío que creas mejor → vision_propose y {user} decide; eso solo bloquea ESE punto (y lo que dependa de él): sigue con otros puntos no bloqueados. Si todo lo pendiente depende de propuestas o de PRs sin fusionar, no lances nada y dilo. Si vision_start lo rechaza (uso, desactivado…), no insistas.
 
 BLOQUEOS ENTRE AGENTES: si un agente A no puede seguir porque falta el trabajo de otro (un punto previo sin hacer o sin fusionar, un error de planificación): 1) si ese trabajo lo hace ya un agente F, o puedes lanzarlo con vision_start (sin que dependa de nada sin fusionar), usa vision_wait(A, F) y responde a A con vision_answer que termine su turno sin seguir y espere tu aviso; 2) si no se puede, escala. Cuando F se fusione te llegará un evento DESBLOQUEO: responde a A con vision_answer que integre develop en su rama (git merge develop) y continúe. Si F acabó sin fusionar, decide: relanzar, esperar más o escalar.
 
@@ -116,6 +125,12 @@ sobre PRs sin fusionar" valen igual: si su petición choca con el plan o con ell
 Tu respuesta se la lee Jarvis (a menudo en voz alta): breve, en frases, sin listas largas ni ids si no hacen falta. \
 Aquí no hace falta la línea final de veredicto.
 
+ESTILO CON LOS AGENTES: lo que escribes a los agentes (vision_answer, agent_message) y en agent_note, telegráfico: lo \
+esencial, sin preámbulos ni repetir lo que ya saben. Lo que lee Jarvis a {user}, en frases normales.
+
+GASTO: si hablas de lo que cuesta algo (un agente, una tarea, tus turnos), dalo en TOKENS (en miles o millones) y, si \
+lo sabes, en % de la ventana de 5 horas. Nada de dólares salvo que {user} los pida: el $ es una estimación del CLI.
+
 Termina cada evento de agente con UNA línea: "RESPONDIDA: …", "ESCALADA: …", "FUSIONADO: …", "CAMBIOS: …", "LANZADO: …", "ESPERA: …", "CONTINÚA: …", "PROPUESTA: …" o "A {user_upper}: …", con el resumen en una frase (si fusionas y lanzas en el mismo evento: "FUSIONADO: … · LANZADO: …")."""
 
 _HANDOFF_PROMPT = """\
@@ -126,12 +141,23 @@ cualquier cosa pendiente. Como máximo 20 líneas por proyecto. Solo el handoff,
 
 
 class Vision:
-    """Sesión del gestor autónomo y su bucle de eventos."""
+    """Sesión del gestor autónomo y su bucle de eventos.
+
+    Los atributos ``Hot`` (Fase 6, bloque 5) se pueden cambiar en caliente desde la web;
+    el modelo y el esfuerzo se aplican al abrir la siguiente sesión.
+    """
+
+    model = Hot("JARVIS_VISION_MODEL")
+    effort = Hot("JARVIS_VISION_EFFORT")
+    handoff_after = Hot("JARVIS_VISION_HANDOFF_AFTER")
+    die_after = Hot("JARVIS_VISION_DIE_AFTER")
+    max_context = Hot("JARVIS_VISION_MAX_CONTEXT")
 
     def __init__(
         self,
         data_dir: Path,
-        model: str = MODEL_OPUS,
+        model: str = VISION_MODEL,
+        effort: str = "medium",
         handoff_after: float = 2700,
         die_after: float = 3000,
         max_context: int = 100_000,
@@ -139,6 +165,9 @@ class Vision:
     ) -> None:
         self.data_dir = data_dir
         self.model = model
+        # Esfuerzo medio: Vision coordina y revisa contra el plan, no diseña;
+        # el razonamiento cuenta como salida y es lo más caro de Opus.
+        self.effort = effort
         self.handoff_after = handoff_after
         self.die_after = die_after
         self.max_context = max_context
@@ -152,6 +181,8 @@ class Vision:
         self._idle_since = time.monotonic()
         self._handoff_done = False
         self._context_tokens = 0
+        # total_cost_usd del SDK es ACUMULADO por sesión: lo ya apuntado, para sacar el del turno.
+        self._cost_seen = 0.0
         self._task: asyncio.Task | None = None
         # Un turno a la vez: el bucle de eventos y los mensajes del usuario
         # comparten la misma sesión del SDK (no admite dos query a la vez).
@@ -258,12 +289,12 @@ class Vision:
             f"{agent['mode']}) pregunta al gestor:\n«{agent.get('question')}»\n"
             f"Encargo (inicio): {agent['task'][:300]}"
         )
-        await self._event(agent, prompt, f"preguntó «{agent.get('question') or ''}»")
+        await self._event(agent, prompt, f"preguntó «{agent.get('question') or ''}»", "question")
 
-    async def _event(self, agent: dict, prompt: str, what: str) -> None:
+    async def _event(self, agent: dict, prompt: str, what: str, kind: str) -> None:
         """Un turno de Vision para un evento y su registro para Jarvis."""
         try:
-            reply = await self._turn(prompt)
+            reply = await self._turn(prompt, kind=kind, agent=agent)
         except Exception:  # noqa: BLE001 - sesión rota: la siguiente empieza de cero
             log.exception("Vision: falló el evento del agente %s", agent["id"])
             await self._close("error en un turno")
@@ -281,13 +312,13 @@ class Vision:
         if agent["state"] not in ("idle", "done") or agent.get("pr_status") != "open":
             return
         repo = agent["repo"]
-        tests = {1: "pasan", 0: "FALLAN"}.get(agent.get("pr_tests_passed"), "sin informar")
+        tests = {1: "suite en verde", 0: "suite en ROJO"}.get(agent.get("pr_tests_passed"), "suite sin ejecutar")
         prompt = (
             f"{self._project_intro(repo)}EVENTO PR: el agente {agent['id']} ({repo}) ha terminado. "
             f"PR «{agent.get('pr_title')}», rama {agent.get('branch')} → {agent.get('base_branch')}, "
-            f"tests: {tests}.\nEncargo (inicio): {agent['task'][:300]}"
+            f"{tests}.\nEncargo (inicio): {agent['task'][:300]}"
         )
-        await self._event(agent, prompt, f"PR «{agent.get('pr_title')}»")
+        await self._event(agent, prompt, f"PR «{agent.get('pr_title')}»", "pr")
 
     async def _check_waits(self, every: list[dict], waiting: dict[str, dict]) -> None:
         """Esperas de ``vision_wait``: si el agente bloqueante ya acabó, evento DESBLOQUEO."""
@@ -317,7 +348,7 @@ class Vision:
             f"{agent['state']}) esperaba al agente {wait['blocked_by']} ({wait.get('reason') or 'sin motivo'}); "
             f"{how}.\nEncargo del que espera (inicio): {agent['task'][:300]}"
         )
-        await self._event(agent, prompt, f"esperaba a {wait['blocked_by']}")
+        await self._event(agent, prompt, f"esperaba a {wait['blocked_by']}", "unblock")
 
     async def message(self, text: str) -> str:
         """Un mensaje del usuario (Fase 5): un turno en la misma sesión que los eventos.
@@ -330,7 +361,7 @@ class Vision:
                         if re.search(rf"\b{re.escape(p.stem)}\b", text, flags=re.IGNORECASE))
         prompt = f"{intro}EVENTO MENSAJE DE USUARIO: {self.user} te escribe:\n«{text.strip()}»"
         try:
-            reply = await self._turn(prompt, user=True)
+            reply = await self._turn(prompt, user=True, kind="message")
         except Exception as exc:
             log.exception("Vision: falló un mensaje del usuario")
             await self._close("error en un turno")
@@ -357,6 +388,7 @@ class Vision:
             options = ClaudeAgentOptions(
                 system_prompt=_SYSTEM_PROMPT.format(user=self.user, user_upper=self.user.upper()),
                 model=self.model,
+                effort=self.effort,
                 permission_mode="default",
                 allowed_tools=list(tools.TOOL_NAMES),
                 # Ninguna herramienta integrada (Bash, Read…): solo las de Vision.
@@ -368,25 +400,54 @@ class Vision:
             # _projects NO se vacía aquí: _project_intro ya ha apuntado el proyecto del
             # evento que abre la sesión (se vacía al cerrarla, en _close).
             self._context_tokens = 0
+            self._cost_seen = 0.0
             log.info("Vision: sesión abierta (%s)", self.model)
         return self._client
 
-    async def _turn(self, prompt: str, user: bool = False) -> str:
+    async def _turn(self, prompt: str, user: bool = False, kind: str = "event",
+                    agent: dict | None = None) -> str:
         """Un turno (de uno en uno); devuelve el texto y actualiza el contexto y el reloj.
 
         Args:
             user: True si es un mensaje del usuario: habilita ``user_merge`` durante el turno.
+            kind: Qué lo provoca (``message``, ``question``, ``pr``, ``unblock``, ``handoff``),
+                para las métricas.
+            agent: Agente del evento, si lo hay (las métricas lo atribuyen a su tarea).
         """
         global _user_turn
         async with self._lock:
             _user_turn = user
+            vision_metrics.begin_turn()
+            started, before = time.time(), await vision_metrics.usage_snapshot()
+            final: ResultMessage | None = None
             try:
-                return await self._query(prompt)
+                text, final = await self._query(prompt)
             finally:
                 _user_turn = False
+                if final is not None:
+                    try:
+                        await self._record_metrics(final, kind, agent, started, before)
+                    except Exception:  # noqa: BLE001 - una métrica perdida no tumba el turno
+                        log.exception("Vision: no se pudo medir el turno")
+            if final and final.is_error:
+                raise RuntimeError(text or "Turno de Vision con error.")
+            return text
 
-    async def _query(self, prompt: str) -> str:
-        """El turno en sí (con el lock tomado)."""
+    async def _record_metrics(self, final: ResultMessage, kind: str, agent: dict | None,
+                              started: float, before: dict) -> None:
+        """Una fila por turno, con el formato de las del worker (tokens primero; $ de referencia)."""
+        total = final.total_cost_usd or 0.0
+        cost, self._cost_seen = max(total - self._cost_seen, 0.0), total
+        vision_metrics.record({
+            "ts": round(time.time(), 1), "agent": "vision", "kind": kind,
+            "for_agent": agent["id"] if agent else None, "repo": agent["repo"] if agent else None,
+            "model": self.model, "secs": round(time.time() - started, 1),
+            "tokens": vision_metrics.tokens(final.usage), "cost_usd": round(cost, 5),
+            "num_turns": final.num_turns, "before": before, "after": await vision_metrics.usage_snapshot(),
+        })
+
+    async def _query(self, prompt: str) -> tuple[str, ResultMessage | None]:
+        """El turno en sí (con el lock tomado): el texto y el ``ResultMessage`` final."""
         client = await self._ensure_client()
         await client.query(prompt)
         texts: list[str] = []
@@ -405,9 +466,7 @@ class Vision:
         self._idle_since = time.monotonic()
         self._handoff_done = False
         text = (final.result if final and final.result else "\n".join(texts)).strip()
-        if final and final.is_error:
-            raise RuntimeError(text or "Turno de Vision con error.")
-        return text
+        return text, final
 
     async def _handoff(self) -> None:
         """Escribe el handoff por proyecto (fichero por repo en el volumen de datos)."""
@@ -417,7 +476,7 @@ class Vision:
         # llegue a los ``die_after`` s desde el último evento, no desde el handoff.
         since = self._idle_since
         try:
-            text = await self._turn(_HANDOFF_PROMPT)
+            text = await self._turn(_HANDOFF_PROMPT, kind="handoff")
         except Exception:  # noqa: BLE001 - sin handoff nuevo vale el anterior
             log.exception("Vision: falló el handoff")
             return
@@ -561,7 +620,8 @@ def vision_from_env(user: str) -> Vision:
     env = os.getenv
     return Vision(
         data_dir=_data_dir(),
-        model=env("JARVIS_VISION_MODEL", "") or MODEL_OPUS,
+        model=env("JARVIS_VISION_MODEL", "") or VISION_MODEL,
+        effort=env("JARVIS_VISION_EFFORT", "") or "medium",
         handoff_after=float(env("JARVIS_VISION_HANDOFF_AFTER", "2700")),
         die_after=float(env("JARVIS_VISION_DIE_AFTER", "3000")),
         max_context=int(env("JARVIS_VISION_MAX_CONTEXT", "100000")),

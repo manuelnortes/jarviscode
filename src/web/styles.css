@@ -790,6 +790,74 @@ body {
 .pr-discard { color: #fca5a5; border-color: rgba(248, 113, 113, 0.5); }
 .pr-discard:disabled { opacity: 0.5; cursor: wait; }
 
+/* ── Ajustes en caliente (Hito 9, Fase 6): chip ⚙ + modal ───────────────── */
+.set-chip { font-size: 15px; letter-spacing: 0; padding: 0 9px; }
+.set-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px auto;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--bd-neutral);
+}
+.set-row__label { color: var(--text); font-size: 14px; }
+.set-row .pr-meta { grid-column: 1 / -1; margin-top: 0; }
+.set-row input, .set-row select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--bd-neutral);
+  border-radius: 6px;
+}
+.set-row.is-changed input, .set-row.is-changed select { border-color: var(--cyan); }
+.set-row.is-error input, .set-row.is-error select { border-color: #f87171; }
+.set-row__error { grid-column: 1 / -1; color: #fca5a5; font-size: 12px; }
+.set-hot { color: var(--cyan); }
+
+/* Barras de uso de la suscripción (modal de ajustes): relleno = uso, raya = salvaguarda. */
+.usage-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 48px;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 7px 0;
+}
+.usage-row__label { color: var(--text); font-size: 14px; }
+.usage-row .pr-meta { grid-column: 2 / -1; margin-top: 0; }
+.usage-row__pct { font-family: var(--font-mono); font-size: 13px; color: var(--text); text-align: right; }
+.usage-bar {
+  position: relative;
+  height: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--bd-neutral);
+  border-radius: 5px;
+}
+.usage-bar__fill {
+  height: 100%;
+  background: var(--cyan);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.usage-bar.is-over .usage-bar__fill { background: #f87171; }
+.usage-bar__limit {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text-2);
+}
+.set-reset { visibility: hidden; }
+.set-row.is-hot .set-reset { visibility: visible; }
+@media (max-width: 640px) {
+  .set-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .set-row__label { grid-column: 1 / -1; }
+}
+
 /* Diff: scroll horizontal propio para no romper el ancho del modal en móvil. */
 .pr-diff {
   margin: 0;

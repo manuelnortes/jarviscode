@@ -151,15 +151,16 @@ Claude Code session (Sonnet by default) working on its own clone of the repo.
 Two modes:
 
 - **read**: the agent reads the code and searches the web, then reports back.
-- **code**: the agent works on its own branch `agent/<id>-<slug>`, runs the tests, commits, and the
-  runner pushes **only that branch** and opens a **lightweight pull request** (title, description,
-  diffstat, test result). Code agents branch off an **integration branch** (`develop`, created and
+- **code**: the agent works on its own branch `agent/<id>-<slug>` and commits; the runner pushes **only that
+  branch**, runs the project's test suite itself (no tokens spent) and opens a **lightweight pull
+  request** (title, description, diffstat, test result tied to that commit). Code agents branch off an **integration branch** (`develop`, created and
   synced with the main branch automatically); nothing ever reaches the main branch without you.
 
 **Vision** is the manager ([docs/vision.md](docs/vision.md)): it reviews each finished PR against the
 project's `PLAN.md` and merges it into `develop`, asks the agent for changes or passes it to you, and
 then launches the next item of the plan (one item per agent). You review `develop` → main yourself.
-Merging is guarded in code: only into the integration branch and only with passing tests. You can
+Merging is guarded in code: only into the integration branch and only with the suite green on the branch's current tip.
+Agents never edit `PLAN.md` (Vision keeps it on `develop`) and add no tests unless Vision asks for one. You can
 also merge or close a PR from the web UI's **PRs** panel (with its full diff) or by asking Jarvis.
 
 Agents can **ask** while working: questions go to Vision first, which answers what the plan settles
@@ -172,21 +173,31 @@ follow-ups. After 35 minutes you get a heads-up; at 45 it writes a **handoff** (
 file named after its branch, `agent/<id>-<slug>.md`, committed to the branch) and at 55 the session
 closes. Messaging it later resumes from the handoff in a fresh session.
 
-**Usage**: agents, Vision and you share the same subscription. The worker reads the real usage
+**Usage**: agents, Vision and Jarvis spend from the Claude account of the token you configure (and
+so do your own Claude sessions if you use the same account). The worker reads the real usage
 (a 1-token Haiku probe while agents run) and, at `JARVIS_AGENT_USAGE_LIMIT`, launches nothing and
 pauses the agents after saving their work (handoff); they resume when you say so, or by themselves
 when the window resets (`JARVIS_AGENT_USAGE_MODE=autonomous`). Every +5 % of the 5-hour window during
 a turn (`JARVIS_AGENT_CHECKPOINT`) the agent stops, estimates what is left and asks Vision to cut the
-scope if needed. `GET /metrics` on the worker gives cost, tokens and usage per turn.
+scope if needed. `GET /api/metrics` on the core gives the spend in tokens of agents and Vision, per task
+(launch, agent turns, review and merge) and per turn.
 
 1. In `.env`: `JARVIS_AGENTS_URL=http://127.0.0.1:8113`, a random `JARVIS_WORKER_TOKEN` and
-   `JARVIS_AGENT_REPOS=<repo>[,<repo>…]`.
-2. In `docker-compose.override.yml`, mount each allowed bare repo at `/repos/<repo>.git` for the
-   `jarvis-worker` service (see `docker-compose.override.example.yml`).
-   For **code** mode, mount it read-write and first run `scripts/agent_repo_setup.sh <repo>.git` as
-   root on the git server: it grants the worker's user write access only where git needs it and
-   installs a `pre-receive` hook that rejects any push from that user outside `agent/*` branches.
+   `JARVIS_AGENT_REPOS_DIR` (default `./agent-repos`).
+2. The allowed repos are the bare repos inside `JARVIS_AGENT_REPOS_DIR`: the compose mounts that folder
+   at `/repos` in the worker and in the core (which merges the PRs there), with mount propagation, so
+   adding one needs no restart. For each repo, first run `scripts/agent_repo_setup.sh <repo>.git` as
+   root on the git server (it grants the worker's user write access only where git needs it and
+   installs a `pre-receive` hook that rejects any push from that user outside `agent/*` branches), then
+   `mount --bind /path/to/<repo>.git <JARVIS_AGENT_REPOS_DIR>/<repo>.git` (plus an `/etc/fstab` line).
+   Unmount it to remove the repo.
 3. `docker compose --profile agents up -d --build jarvis-worker`, then rebuild the core.
+
+**Live settings:** the ⚙ button of the web UI changes most of the variables below without restarting
+(agents at a time, models, efforts, idle lifecycle, usage limits up to 95 %, checkpoints, Vision's
+lifecycle…). The change wins over `.env` until you reset it; it is stored in the `jarvis-settings`
+volume (`settings.json`, with an `audit.jsonl` of old → new values). API: `GET`/`PUT /api/settings`
+(`{"KEY": value | null}`, all or nothing; `null` goes back to `.env`).
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -195,7 +206,7 @@ scope if needed. `GET /metrics` on the worker gives cost, tokens and usage per t
 | `JARVIS_AGENT_IDLE_WARN` / `_HANDOFF_AT` / `_IDLE_TTL` | `2100` / `2700` / `3300` | Idle lifecycle (s): heads-up, handoff, session closed |
 | `JARVIS_AGENT_MANAGER_TIMEOUT` | `900` | Seconds a question waits for the manager before going to you |
 | `JARVIS_AGENT_TURN_TIMEOUT` | `1800` | Max working seconds per turn (waiting for an answer does not count) |
-| `JARVIS_AGENT_USAGE_LIMIT` / `_7D` | `60` / `75` | Safeguard (%) for the 5-hour / weekly window (your own Claude usage included): no agents start, running ones pause after a handoff |
+| `JARVIS_AGENT_USAGE_LIMIT` / `_7D` | `60` / `75` | Safeguard (%) for the 5-hour / weekly window (everything spent by that account counts): no agents start, running ones pause after a handoff |
 | `JARVIS_INTEGRATION_BRANCH` | `develop` | Branch where autonomous work is merged; empty = disabled |
 | `JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS` | `3600` | Voice session timeout while it is managing live agents (instead of 90 s) |
 | `JARVIS_WORKER_MEM_LIMIT` | `4g` | RAM cap of the worker (~0.35 GB per live agent session) |

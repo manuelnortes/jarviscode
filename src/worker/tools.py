@@ -1,8 +1,8 @@
 """Herramientas MCP que el worker da a cada agente (Fase 2).
 
 - ``submit_pr``: el agente declara que ha terminado su trabajo de código y deja
-  los datos del PR estructurados (título, descripción, tests). El push y el
-  registro del PR los hace el runner al acabar el turno, no el agente.
+  los datos del PR estructurados (título, descripción). El push, la suite de
+  tests y el registro del PR los hace el runner al acabar el turno, no el agente.
 - ``ask``: pregunta al gestor (la conversación con Jarvis) o al usuario y
   **bloquea** hasta que llega la respuesta (D9).
 
@@ -60,16 +60,14 @@ def build_agent_server(manager: "AgentManager", agent_id: str, code_mode: bool):
     @tool(
         "submit_pr",
         "Declara terminado tu trabajo de código. Llámala al final, después de hacer commit de todo. "
-        "El sistema empujará tu rama y abrirá el PR con estos datos.",
+        "El sistema empujará tu rama, ejecutará la suite de tests y abrirá el PR con estos datos.",
         {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "Título corto del PR."},
                 "body": {"type": "string", "description": "Qué cambia y por qué; cómo probarlo."},
-                "tests_passed": {"type": "boolean", "description": "Si la batería de tests pasa entera."},
-                "tests_output": {"type": "string", "description": "Resumen de la salida de los tests."},
             },
-            "required": ["title", "body", "tests_passed"],
+            "required": ["title", "body"],
         },
     )
     async def submit_pr(args: dict) -> dict:

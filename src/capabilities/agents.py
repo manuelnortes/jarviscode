@@ -272,12 +272,15 @@ TASK_RULES = (
     "encolan y arrancan cuando hay hueco); nunca 'X + Y + Z' en el mismo encargo. Los que dependan "
     "del PR de otro, después de que se fusione. "
     "El encargo, completo y autocontenido (el agente no ve la conversación), con estas "
-    "secciones: QUÉ HACER · ALCANCE (qué entra y qué no) · CONTEXTO (ficheros relevantes y "
-    "las decisiones del plan que aplican, citadas: 'D3', '§Fase 2'…) · HECHO CUANDO "
-    "(criterio comprobable, tests incluidos) · NO TOCAR. Empieza pidiéndole que lea el "
-    "PLAN.md del proyecto. Si la tarea consume una API, da los nombres reales de los campos "
-    "o una respuesta real de ejemplo (para los tests); las variables de entorno, con su "
-    "nombre exacto del .env.example."
+    "secciones: QUÉ HACER · ALCANCE (qué entra y qué no) · CONTEXTO (rutas EXACTAS de los "
+    "ficheros a leer y a modificar, y copiado el fragmento del plan que aplica, con sus decisiones "
+    "citadas: 'D3', '§Fase 2'…) · HECHO CUANDO (criterio comprobable) · NO TOCAR (siempre: el "
+    "PLAN.md, que no edita el agente). No le pidas que lea el PLAN.md entero ni que explore el repo: "
+    "todo lo que necesita va en el encargo, y lo que no se nombra no se lee. Si la tarea consume una API, da los nombres "
+    "reales de los campos o una respuesta real de ejemplo; las variables de entorno, con su "
+    "nombre exacto del .env.example. Tests: por defecto ninguno; solo si la tarea de verdad lo "
+    "necesita, uno MÍNIMO sumado a la suite existente (una línea o un caso), nunca un fichero "
+    "grande. La suite la ejecuta el sistema al final, no el agente."
 )
 
 
@@ -304,7 +307,7 @@ async def start_agent(repo: str, task: str, mode: str = "read") -> tuple[dict, s
     "agent_start",
     "Encarga una tarea a un agente de Claude que trabaja en segundo plano sobre un repositorio. "
     "mode='read' para revisar, investigar o proponer (no toca nada); mode='code' para cambiar código: "
-    "trabaja en una rama propia, pasa los tests y deja un PR que el usuario revisa (nunca se fusiona "
+    "trabaja en una rama propia y deja un PR (el sistema pasa la suite) que el usuario revisa (nunca se fusiona "
     "solo). Devuelve su id. Si las notificaciones están activas, el usuario recibirá un aviso al "
     "móvil cuando termine.",
     {

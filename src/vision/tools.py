@@ -12,8 +12,10 @@ Revisión de PRs (tarea (b)):
 
 - ``pr_diff``: el diff del PR de un agente.
 - ``vision_merge``: fusiona un PR **solo** en la rama de integración (``develop``)
-  y **solo** con los tests en verde. La guarda está en el código, no en el prompt:
-  Vision nunca toca la rama principal.
+  y **solo** con la suite en verde (la ejecuta el runner sobre la punta de la rama).
+  La guarda está en el código, no en el prompt: Vision nunca toca la rama principal.
+- ``vision_plan_edit``: el plan lo actualiza Vision, no los agentes: reemplazo
+  exacto en ``PLAN.md`` o ``docs/plan/*.md``, solo en la rama de integración.
 - ``vision_flag``: un PR (o algo) necesita al usuario: bitácora + aviso al móvil.
 
 Gestión del plan (tareas (h) e (i)):
@@ -43,6 +45,8 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.capabilities import agents
 from src.capabilities.project_files import project_file, project_list
+from src.vision import metrics as vision_metrics
+from src.worker import settings
 
 SERVER_NAME = "vision"
 # Tope del diff que se le pasa a Vision (caracteres).
@@ -93,7 +97,8 @@ def merge_guard(agent: dict) -> str:
     """Motivo por el que Vision NO puede fusionar este PR ('' si puede).
 
     La regla dura del usuario: Vision solo fusiona en la rama de integración y con
-    los tests en verde. Nunca en la principal.
+    la suite en verde según la ejecutó el runner sobre la punta actual de la rama.
+    Nunca en la principal. No exige tests nuevos.
     """
     from src.capabilities import prs
 
@@ -102,7 +107,11 @@ def merge_guard(agent: dict) -> str:
         return (f"su base es '{agent.get('base_branch')}', no la rama de integración "
                 f"'{integration or '(desactivada)'}': ese PR lo fusiona el usuario")
     if agent.get("pr_tests_passed") != 1:
-        return "los tests no están en verde (o no se informaron): pide al agente que los pase"
+        return "la suite no está en verde: mira la salida en su detalle y pide al agente que arregle su cambio"
+    tip = prs.branch_tip(agent["repo"], agent["branch"])
+    if not tip or agent.get("pr_tests_sha") != tip:
+        return ("el verde es de un commit anterior a la punta de la rama: espera a que el sistema "
+                "vuelva a pasar la suite (lo hace al acabar cada turno del agente)")
     return ""
 
 
@@ -167,6 +176,35 @@ async def user_close(args: dict) -> dict:
 
 
 @tool(
+    "vision_plan_edit",
+    "Edita el plan de un proyecto en la rama de integración (develop), nunca en la principal: sustituye un "
+    "texto exacto (copiado literal del fichero actual y que aparezca una sola vez) por otro y hace commit. "
+    "Para marcar la casilla de un punto fusionado y anotar en una línea lo que hizo el agente. Nunca para "
+    "decisiones de diseño que el usuario no haya aprobado.",
+    {
+        "type": "object",
+        "properties": {
+            "repo": {"type": "string"},
+            "path": {"type": "string", "description": "PLAN.md (por defecto) o un .md de docs/plan/."},
+            "old": {"type": "string", "description": "Texto actual, literal, que aparece una sola vez."},
+            "new": {"type": "string", "description": "Texto que lo sustituye."},
+            "message": {"type": "string", "description": "Resumen del commit (sin prefijo)."},
+        },
+        "required": ["repo", "old", "new", "message"],
+    },
+)
+async def vision_plan_edit(args: dict) -> dict:
+    from src.capabilities import prs
+
+    async def go() -> str:
+        sha = await prs.plan_edit(args["repo"], args.get("path") or "PLAN.md", args["old"], args["new"],
+                                  args["message"])
+        return f"Plan actualizado en {prs.integration_branch()} (commit {sha[:10]})."
+
+    return await agents._run(go())
+
+
+@tool(
     "vision_flag",
     "Algo de un agente necesita al usuario y no es una pregunta pendiente (p. ej. un PR que se desvía "
     "del plan o lo obliga a cambiar). Lo apunta en la bitácora y le avisa al móvil.",
@@ -222,7 +260,7 @@ async def vision_start(args: dict) -> dict:
     from src.vision.session import record_action
 
     async def go() -> str:
-        if os.getenv("JARVIS_VISION_LAUNCH", "1") == "0":
+        if not settings.get("JARVIS_VISION_LAUNCH", os.getenv("JARVIS_VISION_LAUNCH", "1") != "0"):
             return "Lanzar agentes está desactivado para Vision (JARVIS_VISION_LAUNCH=0): no lo intentes más."
         if not args.get("plan_item", "").strip():
             return "Falta plan_item: Vision solo lanza puntos del plan."
@@ -230,6 +268,7 @@ async def vision_start(args: dict) -> dict:
         await agents._call("POST", f"/agents/{agent['id']}/note",
                            json={"text": f"Lanzado por Vision · punto del plan: {args['plan_item']}"})
         record_action(args["repo"], agent["id"], args["task"], f"lanzó «{args['plan_item']}»", "LANZADO")
+        vision_metrics.launched(agent["id"])
         return f"Agente {agent['id']} lanzado ({agent['state']}, rama {agent.get('branch')}). {sync}".strip()
 
     return await agents._run(go())
@@ -293,7 +332,7 @@ async def vision_wait(args: dict) -> dict:
 
 _TOOLS = [
     project_file, project_list, vision_answer, pr_diff, vision_merge, vision_flag,
-    vision_start, vision_propose, vision_wait, user_merge, user_close,
+    vision_start, vision_propose, vision_wait, user_merge, user_close, vision_plan_edit,
     agents.agent_status, agents.agent_result, agents.agent_note, agents.agent_escalate,
     agents.agent_message, agents.agent_cancel,
 ]
@@ -302,4 +341,6 @@ TOOL_NAMES = [f"mcp__{SERVER_NAME}__{t.name}" for t in _TOOLS]
 
 def build_server():
     """Servidor MCP en proceso con las herramientas de Vision."""
-    return create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=_TOOLS)
+    # Envueltas para que las métricas sepan a qué agentes toca cada turno (coste por tarea).
+    return create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0",
+                                 tools=[vision_metrics.tracked(t) for t in _TOOLS])

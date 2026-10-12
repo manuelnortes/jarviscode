@@ -28,7 +28,9 @@ terminal, Claude Code, un script…) sin hablar con Jarvis por voz.
 
 1. Un **encargo** cubre **un** punto sin marcar del `PLAN.md` del proyecto. Un agente de código trabaja en
    su propia rama `agent/<id>-<slug>`, que sale de **`develop`** (se crea y se pone al día con `main` sola).
-2. Al terminar deja un **PR ligero** (título, descripción, diffstat, resultado de los tests).
+2. Al terminar deja un **PR ligero** (título, descripción, diffstat). El worker ejecuta él la suite de
+   tests del proyecto sobre la punta de la rama (sin gastar tokens); si falla, le devuelve la salida al
+   agente. Los agentes no editan el `PLAN.md`: Vision marca el punto en `develop` tras fusionar.
 3. Vision lo revisa contra el plan y o bien **lo fusiona en `develop`**, o pide cambios al agente, o te lo
    pasa a ti. Tras fusionar, **lanza el siguiente punto** del plan.
 4. Las preguntas de los agentes van primero a Vision: responde lo que el plan deja claro (o lo que es pura
@@ -36,7 +38,7 @@ terminal, Claude Code, un script…) sin hablar con Jarvis por voz.
 5. La fusión **`develop` → `main`** la revisas y la haces tú. Vision nunca toca la rama principal.
 
 Las reglas de seguridad están **en el código, no en el prompt**: la herramienta de fusión de Vision rechaza
-todo lo que no sea la rama de integración o no tenga los tests en verde (`merge_guard`); fusionar o cerrar
+todo lo que no sea la rama de integración o no tenga la suite en verde sobre la punta actual de la rama (`merge_guard`); fusionar o cerrar
 un PR en tu nombre (`user_merge`, `user_close`) solo funciona durante el turno de un mensaje *tuyo*; y el
 usuario del worker solo puede empujar ramas `agent/*` (hook `pre-receive`).
 
@@ -52,9 +54,9 @@ Hoy Vision vive **dentro del proceso del núcleo de Jarvis**, así que hay que l
 
 1. Sigue [Configurar agentes](../README.es.md#configurar-agentes) (contenedor del worker, token,
    repos, `agent_repo_setup.sh`).
-2. Monta los **bare repos** en el núcleo: Vision lee de ahí cada `PLAN.md` (de `develop` si existe) y el
-   núcleo fusiona los PR, así que cada repo de agentes va con escritura (ver
-   `docker-compose.override.example.yml`).
+2. Monta los **bare repos** en el núcleo, de solo lectura (`JARVIS_GIT_ROOT`): Vision lee de ahí cada
+   `PLAN.md` (de `develop` si existe). Los repos de los agentes son los de `JARVIS_AGENT_REPOS_DIR`, que el
+   compose monta con escritura en `/repos` en el núcleo y en el worker.
 3. En el `.env`:
 
    ```bash
@@ -63,7 +65,7 @@ Hoy Vision vive **dentro del proceso del núcleo de Jarvis**, así que hay que l
    JARVIS_STT_PRELOAD=0                 # no cargar Whisper/Piper (~2 GB de RAM menos)
    JARVIS_AGENTS_URL=http://127.0.0.1:8113
    JARVIS_WORKER_TOKEN=<aleatorio>
-   JARVIS_AGENT_REPOS=mi-repo
+   JARVIS_AGENT_REPOS_DIR=/srv/agent-repos   # un bare (o bind mount) por repo permitido
    JARVIS_GIT_ROOT=/opt/git             # donde están montados los bare repos en el núcleo
    JARVIS_INTEGRATION_BRANCH=develop
    JARVIS_AGENTS_MAX=1                  # empieza con un agente a la vez
@@ -107,7 +109,9 @@ Endpoints de solo lectura (sin pasar por Opus):
 | `GET /api/prs` · `GET /api/prs/{id}` | núcleo | PRs, y un PR con su diff completo |
 | `POST /api/prs/{id}/merge` · `/close` | núcleo | Fusionar o cerrar un PR directamente, sin Vision |
 | `GET /usage` | worker | Último uso conocido de las ventanas de 5 h y semanal |
-| `GET /metrics?last=50` | worker | Coste, tokens y uso antes/después de cada turno, con resumen |
+| `GET /metrics?last=50` | worker | Solo agentes: tokens, coste y uso antes/después de cada turno, con resumen |
+| `GET` · `PUT /api/settings` | núcleo | Ajustes en caliente (panel ⚙ de la web): valor efectivo, origen y cuándo se aplica; `PUT {"CLAVE": valor \| null}`, todo o nada |
+| `GET /api/metrics?tasks=20` | núcleo | Gasto en tokens de agentes y Vision, por tarea (lanzamiento → agente → revisión/fusión, tiempo real) y por turno de Vision; el `$` solo de referencia |
 
 El worker solo escucha en `127.0.0.1` y pide la cabecera `X-Jarvis-Token`. El núcleo no tiene
 autenticación propia: déjalo en la LAN o tras un proxy inverso con SSO.
@@ -124,11 +128,14 @@ Son las reglas con las que salió bien el primer proyecto real (10 agentes, 7 PR
 3. **Contratos reales.** Si una tarea consume una API, el plan (o el encargo) debe dar los nombres reales de
    los campos o una respuesta real grabada; las variables de entorno, con su nombre exacto del
    `.env.example`. El único agente que tuvo que adivinar se inventó el contrato y su PR se tiró.
-4. **Los tests son la puerta.** Un PR sin tests en verde no se fusiona nunca; pide que los tests queden
-   registrados (p. ej. en `docs/tests.md`) antes de aceptar una funcionalidad.
+4. **La suite es la puerta; los tests nuevos, la excepción.** Un PR solo se fusiona si la suite existente
+   está en verde sobre su commit exacto, ejecutada por el sistema y no declarada por el agente. Los agentes
+   no añaden tests salvo que Vision pida uno, y entonces mínimo y dentro de la suite existente: los ficheros
+   de tests enormes y los que fijan datos editados a mano gastan mucho uso y detectan poco.
 5. **`develop` es de Vision, `main` es tuya.** Revisa `develop` → `main` a mano al cerrar cada fase.
-6. **Presupuesta la suscripción.** Agentes y Vision gastan de la misma suscripción de Claude que tú. Empieza
-   con `JARVIS_AGENTS_MAX` bajo, fija `JARVIS_AGENT_USAGE_LIMIT` y mira `/metrics`: en nuestras pruebas un
+6. **Presupuesta la cuenta.** Agentes, Vision y Jarvis gastan de la cuenta de Claude del token que le
+   des a Jarvis (y tus propias sesiones de Claude también, si usan la misma cuenta). Empieza
+   con `JARVIS_AGENTS_MAX` bajo, fija `JARVIS_AGENT_USAGE_LIMIT` y mira `/api/metrics`: en nuestras pruebas un
    encargo costó **0,4–1 $**.
    Los puntos de control (`JARVIS_AGENT_CHECKPOINT`, por defecto cada +5 % de la ventana) hacen que los
    agentes largos paren, estimen lo que les falta y pidan a Vision que les recorte el alcance.

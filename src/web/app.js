@@ -1193,6 +1193,273 @@
   pollPrs();
   setInterval(pollPrs, 30000);
 
+  // ── Ajustes en caliente (Hito 9, Fase 6, bloque 5) ──────────────────────────
+  // Chip ⚙ (solo con worker de agentes) → modal con los ajustes del worker y de Vision.
+  // GUARDAR manda solo los campos cambiados (PUT /api/settings, todo o nada); ↺ quita el
+  // valor en caliente de un campo y vuelve al del .env.
+  const setChip = document.getElementById("set-chip");
+  const setModal = document.getElementById("set-modal");
+  const setGroups = document.getElementById("set-groups");
+  const setMsg = document.getElementById("set-msg");
+  const setRepos = document.getElementById("set-repos");
+  const setSave = document.getElementById("set-save");
+  /** @type {Map<string, {item: object, input: HTMLElement, row: HTMLElement}>} */
+  const setFields = new Map();
+  const SET_APPLIES = {
+    instant: "al instante",
+    next_agent: "próximo agente",
+    next_question: "próxima pregunta",
+    next_vision: "próxima sesión de Vision",
+  };
+  const SET_ORIGIN = { hot: "en caliente", env: ".env", default: "por defecto" };
+
+  /**
+   * Aviso en la cabecera del modal.
+   * @param {string} text
+   * @param {boolean} [isError]
+   */
+  function setNotice(text, isError = false) {
+    setMsg.textContent = text;
+    setMsg.classList.toggle("is-error", isError);
+    setMsg.hidden = !text;
+  }
+
+  /**
+   * Valor de un ajuste como texto del control (bool → "1"/"0").
+   * @param {object} item
+   * @param {*} value
+   */
+  function setText(item, value) {
+    if (item.kind === "bool") return value ? "1" : "0";
+    return value === null || value === undefined ? "" : String(value);
+  }
+
+  /**
+   * Control de un ajuste según su tipo.
+   * @param {object} item Ajuste de la API.
+   * @returns {HTMLElement}
+   */
+  function setInput(item) {
+    let input;
+    if (item.kind === "bool" || item.kind === "enum") {
+      input = document.createElement("select");
+      const options = item.kind === "bool" ? [["1", "sí"], ["0", "no"]] : item.choices.map((c) => [c, c]);
+      for (const [value, label] of options) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = label;
+        input.append(opt);
+      }
+    } else {
+      input = document.createElement("input");
+      input.type = item.kind === "model" ? "text" : "number";
+      if (item.min !== null) input.min = String(item.min);
+      if (item.max !== null) input.max = String(item.max);
+    }
+    input.value = setText(item, item.value);
+    return input;
+  }
+
+  /**
+   * Pinta los ajustes agrupados (worker / núcleo).
+   * @param {{settings: object[], repos: string[]|null}} data
+   */
+  function renderSettings(data) {
+    setGroups.replaceChildren();
+    setFields.clear();
+    const groups = [["worker", "AGENTES (WORKER)"], ["core", "VISION Y WEB (NÚCLEO)"]];
+    for (const [scope, title] of groups) {
+      const items = data.settings.filter((i) => i.scope === scope);
+      if (!items.length) continue;
+      const label = document.createElement("p");
+      label.className = "modal__label";
+      label.textContent = title;
+      setGroups.append(label);
+      for (const item of items) {
+        const row = document.createElement("div");
+        row.className = "set-row" + (item.origin === "hot" ? " is-hot" : "");
+        const name = document.createElement("span");
+        name.className = "set-row__label";
+        name.textContent = item.label;
+        const input = setInput(item);
+        input.addEventListener("input", () => {
+          row.classList.toggle("is-changed", input.value !== setText(item, item.value));
+        });
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.className = "modal__action set-reset";
+        reset.textContent = "↺";
+        reset.title = `Volver al valor del .env (${setText(item, item.env)})`;
+        reset.addEventListener("click", () => saveSettings({ [item.key]: null }));
+        const meta = document.createElement("div");
+        meta.className = "pr-meta";
+        const origin = document.createElement("span");
+        origin.className = item.origin === "hot" ? "set-hot" : "";
+        origin.textContent = SET_ORIGIN[item.origin] || item.origin;
+        const range = item.min !== null ? ` · ${item.min}–${item.max}` : "";
+        meta.append(`${item.key} · `, origin,
+          ` · se aplica: ${SET_APPLIES[item.applies] || item.applies}${range} · .env: ${setText(item, item.env)}`);
+        row.append(name, input, reset, meta);
+        setGroups.append(row);
+        setFields.set(item.key, { item, input, row });
+      }
+    }
+    if (data.repos === null) {
+      setRepos.textContent = "El worker no responde: solo se muestran los ajustes del núcleo.";
+    } else {
+      setRepos.textContent = data.repos.length ? data.repos.join(" · ") : "Ninguno.";
+    }
+  }
+
+  const setUsage = document.getElementById("set-usage");
+  const USAGE_WINDOWS = [["five_hour", "5 H"], ["seven_day", "7 D"]];
+
+  /**
+   * Pinta una barra por ventana con la marca del límite de la salvaguarda.
+   * @param {{windows: object, limits: object, probed_at: number|null, probe_error: string|null}} data
+   *   Respuesta de GET /api/usage (utilization y limits en 0–1, fechas en epoch s).
+   */
+  function renderUsage(data) {
+    setUsage.replaceChildren();
+    for (const [key, title] of USAGE_WINDOWS) {
+      const win = (data.windows || {})[key];
+      const rawLimit = (data.limits || {})[key];
+      const limit = rawLimit != null ? Math.round(rawLimit * 100) : null;
+      const pct = win && win.utilization != null ? Math.round(win.utilization * 100) : null;
+      const row = document.createElement("div");
+      row.className = "usage-row";
+      const name = document.createElement("span");
+      name.className = "usage-row__label";
+      name.textContent = title;
+      const bar = document.createElement("div");
+      bar.className = "usage-bar" + (pct !== null && limit != null && pct >= limit ? " is-over" : "");
+      const fill = document.createElement("div");
+      fill.className = "usage-bar__fill";
+      fill.style.width = `${Math.min(pct ?? 0, 100)}%`;
+      bar.append(fill);
+      if (limit != null) {
+        const mark = document.createElement("div");
+        mark.className = "usage-bar__limit";
+        mark.style.left = `${Math.min(limit, 100)}%`;
+        mark.title = `Salvaguarda: ${limit} %`;
+        bar.append(mark);
+      }
+      const value = document.createElement("span");
+      value.className = "usage-row__pct";
+      value.textContent = pct === null ? "?" : `${pct} %`;
+      const meta = document.createElement("div");
+      meta.className = "pr-meta";
+      const resets = win && win.resets_at
+        ? new Date(win.resets_at * 1000).toLocaleString("es-ES", { weekday: "short", hour: "2-digit", minute: "2-digit" })
+        : "—";
+      meta.textContent = `reinicio: ${resets}` + (limit != null ? ` · salvaguarda: ${limit} %` : "");
+      row.append(name, bar, value, meta);
+      setUsage.append(row);
+    }
+    const foot = document.createElement("p");
+    foot.className = "pr-meta";
+    const at = data.probed_at ? new Date(data.probed_at * 1000).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }) : null;
+    foot.textContent = (at ? `Leído a las ${at}` : "Sin lectura de la sonda") + (data.probe_error ? ` · error: ${data.probe_error}` : "");
+    setUsage.append(foot);
+  }
+
+  /** Carga el uso aparte de los ajustes: si falla, los ajustes se ven igual. */
+  async function loadUsage() {
+    try {
+      renderUsage(await prFetch("/api/usage"));
+    } catch (err) {
+      setUsage.replaceChildren();
+      const p = document.createElement("p");
+      p.className = "pr-meta";
+      p.textContent = `Uso no disponible: ${err.message}`;
+      setUsage.append(p);
+    }
+  }
+
+  /** Carga los ajustes y los pinta. */
+  async function loadSettings() {
+    setNotice("");
+    loadUsage();
+    try {
+      renderSettings(await prFetch("/api/settings"));
+    } catch (err) {
+      setNotice(err.message, true);
+    }
+  }
+
+  /**
+   * Manda cambios a la API. Con 422 marca el error de cada campo y no aplica nada.
+   * @param {Object<string, *>} changes `{CLAVE: valor | null}`.
+   */
+  async function saveSettings(changes) {
+    if (!Object.keys(changes).length) {
+      setNotice("No hay cambios.");
+      return;
+    }
+    setSave.disabled = true;
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 422 && data.detail && typeof data.detail === "object") {
+        for (const { row } of setFields.values()) row.classList.remove("is-error");
+        for (const el of setGroups.querySelectorAll(".set-row__error")) el.remove();
+        for (const [key, error] of Object.entries(data.detail)) {
+          const field = setFields.get(key);
+          if (!field) continue;
+          field.row.classList.add("is-error");
+          const p = document.createElement("div");
+          p.className = "set-row__error";
+          p.textContent = error;
+          field.row.append(p);
+        }
+        setNotice("No se ha guardado nada: corrige los campos marcados.", true);
+        return;
+      }
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+      renderSettings(data);
+      setNotice("Guardado.");
+    } catch (err) {
+      setNotice(err.message, true);
+    } finally {
+      setSave.disabled = false;
+    }
+  }
+
+  setSave.addEventListener("click", () => {
+    const changes = {};
+    for (const [key, { item, input }] of setFields) {
+      if (input.value === setText(item, item.value)) continue;
+      if (item.kind === "bool") changes[key] = input.value === "1";
+      else if (item.kind === "enum" || item.kind === "model") changes[key] = input.value.trim();
+      else changes[key] = input.value === "" ? "" : Number(input.value);
+    }
+    saveSettings(changes);
+  });
+
+  function closeSetModal() {
+    setModal.hidden = true;
+  }
+
+  setChip.addEventListener("click", () => {
+    setModal.hidden = false;
+    loadSettings();
+  });
+  document.getElementById("set-close").addEventListener("click", closeSetModal);
+  document.getElementById("set-overlay").addEventListener("click", closeSetModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !setModal.hidden) closeSetModal();
+  });
+
+  // El chip solo aparece si el núcleo tiene worker de agentes (si no, /api/settings
+  // solo traería los timeouts de la web, que no justifican el botón).
+  prFetch("/api/settings")
+    .then((data) => { setChip.hidden = data.repos === null && !data.settings.some((i) => i.scope === "worker"); })
+    .catch(() => {});
+
   // ── Demo: estado inicial visible ─────────────────────────────────────────────
   if (DEMO) {
     setMode("speaking", "DEMO · OSCILANDO");

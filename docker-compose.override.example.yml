@@ -12,19 +12,13 @@ services:
       - /ruta/a/bare-repos:/opt/git:ro
       # Único escribible: el remoto de las notas (push del Inbox).
       - /ruta/a/bare-repos/notes.git:/opt/git/notes.git
-      # Agentes que programan (Hito 9): el núcleo fusiona sus PR, así que cada
-      # repo de JARVIS_AGENT_REPOS también va con escritura (el worker no puede:
-      # el hook solo le deja empujar ramas agent/*).
-      - /ruta/a/bare-repos/mi-repo.git:/opt/git/mi-repo.git
 
-  # Worker de agentes (perfil "agents"): SOLO los bare repos que los agentes
-  # pueden usar (los mismos que JARVIS_AGENT_REPOS), en /repos/<repo>.git.
-  # Con escritura (sin :ro) para que empujen sus ramas agent/*: prepara antes
-  # cada bare con scripts/agent_repo_setup.sh (permisos + hook que les impide
-  # tocar cualquier otra rama). Para agentes solo de lectura basta con :ro.
+  # Worker de agentes (perfil "agents"). Los repos que pueden usar NO van aquí: son
+  # los bare de JARVIS_AGENT_REPOS_DIR (docker-compose.yml los monta en /repos en el
+  # worker y en el núcleo). Para dar uno de alta: scripts/agent_repo_setup.sh sobre
+  # el bare y `mount --bind /ruta/a/bare-repos/mi-repo.git <JARVIS_AGENT_REPOS_DIR>/mi-repo.git`.
   jarvis-worker:
     volumes:
-      - /ruta/a/bare-repos/mi-repo.git:/repos/mi-repo.git
       # Opcional: reglas comunes de los agentes (bare con agents/CLAUDE.md y
       # rules/), solo lectura. El worker las clona antes de cada sesión.
       - /ruta/a/bare-repos/mi-config.git:/config.git:ro

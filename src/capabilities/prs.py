@@ -21,8 +21,8 @@ la crea si falta y le trae la principal antes de lanzar un agente de código;
 Vision fusiona ahí los PR alineados con el plan, y el usuario aprueba al final un
 único PR ``develop`` → principal.
 
-Requisitos: ``JARVIS_GIT_ROOT`` con los bare repos y, en Docker, el bare de cada
-repo de ``JARVIS_AGENT_REPOS`` montado con escritura en el núcleo.
+Requisitos: los bare de los agentes con escritura en ``JARVIS_AGENT_GIT_ROOT`` (en Docker,
+``/repos``: la misma carpeta que ve el worker, Fase 6 bloque 5). Si no está, ``JARVIS_GIT_ROOT``.
 """
 
 from __future__ import annotations
@@ -48,11 +48,12 @@ def _bare(repo: str) -> Path:
     Raises:
         RuntimeError: Si no hay carpeta de repos o el repo no existe.
     """
-    root = os.getenv("JARVIS_GIT_ROOT", "").strip()
-    path = Path(root) / f"{repo}.git"
-    if not root or not path.is_dir():
-        raise RuntimeError(f"No encuentro el repo '{repo}' (JARVIS_GIT_ROOT).")
-    return path
+    # Primero la carpeta de los agentes (con escritura); si no, la de todos los repos.
+    for var in ("JARVIS_AGENT_GIT_ROOT", "JARVIS_GIT_ROOT"):
+        root = os.getenv(var, "").strip()
+        if root and (Path(root) / f"{repo}.git").is_dir():
+            return Path(root) / f"{repo}.git"
+    raise RuntimeError(f"No encuentro el repo '{repo}' (JARVIS_AGENT_GIT_ROOT / JARVIS_GIT_ROOT).")
 
 
 def _git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
@@ -81,6 +82,12 @@ def _git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
 def integration_branch() -> str:
     """Rama de integración del trabajo autónomo ('' = desactivada)."""
     return os.getenv("JARVIS_INTEGRATION_BRANCH", "develop").strip()
+
+
+def branch_tip(repo: str, branch: str) -> str:
+    """Commit al que apunta ``branch`` en el bare ('' si no existe)."""
+    return _git("--git-dir", str(_bare(repo)), "rev-parse", "--verify", "--quiet",
+                f"refs/heads/{branch}", check=False)
 
 
 def _main_branch(bare: Path) -> str:
@@ -253,6 +260,54 @@ async def merge(agent_id: str, by: str = "Jarvis") -> dict:
     deleted = shas.pop("branch_deleted")
     updated = await agents.mark_merged(agent_id, shas)
     return {**updated, "branch_deleted": deleted}
+
+
+def _plan_edit(repo: str, path: str, old: str, new: str, message: str) -> str:
+    """Sustituye ``old`` (una sola aparición) por ``new`` en un .md del plan, en la rama de integración.
+
+    Solo ``PLAN.md`` y ``docs/plan/*.md``; nunca la rama principal (el plan lo
+    actualiza Vision en develop; a la principal llega con el PR final del usuario).
+
+    Returns:
+        El commit nuevo.
+
+    Raises:
+        RuntimeError: Ruta no permitida, sin rama de integración, texto ausente o
+            repetido, o fallo de git (el bare no cambia).
+    """
+    norm = Path(path).as_posix()
+    if ".." in Path(norm).parts or not (
+        norm == "PLAN.md" or (norm.startswith("docs/plan/") and norm.endswith(".md"))
+    ):
+        raise RuntimeError("Solo se puede editar PLAN.md o un .md de docs/plan/.")
+    branch = integration_branch()
+    bare = _bare(repo)
+    if not branch or not _branch_exists(bare, branch):
+        raise RuntimeError(f"El repo '{repo}' no tiene rama de integración: el plan no se toca.")
+    with _merge_lock, tempfile.TemporaryDirectory(prefix="jarvis-plan-") as tmp:
+        work = Path(tmp) / "repo"
+        _git("clone", "--quiet", "--branch", branch, str(bare), str(work))
+        target = work / norm
+        if not target.is_file():
+            raise RuntimeError(f"No existe {norm} en {branch}.")
+        text = target.read_text(encoding="utf-8")
+        found = text.count(old) if old else 0
+        if found != 1:
+            raise RuntimeError(
+                f"El texto a sustituir aparece {found} veces en {norm}: tiene que aparecer exactamente una "
+                "(cópialo literal del fichero actual, con más contexto si se repite)."
+            )
+        before = _git("rev-parse", "HEAD", cwd=work)
+        target.write_text(text.replace(old, new, 1), encoding="utf-8")
+        _git("commit", "--quiet", "-am", f"docs(plan): {message.strip() or 'actualiza el plan'}", cwd=work)
+        _git("push", "--quiet", f"--force-with-lease={branch}:{before}", "origin", f"HEAD:refs/heads/{branch}",
+             cwd=work)
+        return _git("rev-parse", "HEAD", cwd=work)
+
+
+async def plan_edit(repo: str, path: str, old: str, new: str, message: str) -> str:
+    """Versión async de ``_plan_edit`` (la usa la herramienta ``vision_plan_edit``)."""
+    return await asyncio.to_thread(_plan_edit, repo, path, old, new, message)
 
 
 async def close(agent_id: str) -> dict:

@@ -72,6 +72,7 @@ from src.core.jarvis import JarvisCore
 from src.core.session import FAREWELL, is_cancel, is_closing
 from src.voice.stt import WhisperSTT
 from src.voice.tts import PiperTTS
+from src.worker import settings
 
 # Logger del bucle de voz: instrumenta el ciclo por turno (start/bytes/end/STT)
 # para diagnosticar pérdidas de turno. Desactivado por defecto: la traza INFO por
@@ -513,10 +514,11 @@ async def voice_endpoint(websocket: WebSocket) -> None:
                 # Reset PEREZOSO por inactividad: si la conexión lleva mucho
                 # parada, reciclamos a Haiku ANTES de procesar esta utterance.
                 idle = time.monotonic() - last_activity
-                timeout = SESSION_TIMEOUT_SECONDS
+                # Los dos TTL se pueden cambiar en caliente desde la web (Fase 6, bloque 5).
+                timeout = settings.get("JARVIS_WEB_SESSION_TIMEOUT_SECONDS", SESSION_TIMEOUT_SECONDS)
                 # Sesión de gestión de agentes: TTL largo mientras queden vivos.
                 if managing_agents and idle > timeout and await agents.has_active():
-                    timeout = AGENTS_SESSION_TIMEOUT_SECONDS
+                    timeout = settings.get("JARVIS_AGENTS_SESSION_TIMEOUT_SECONDS", AGENTS_SESSION_TIMEOUT_SECONDS)
                 if idle > timeout:
                     log.info("VOICE inactividad %.0fs > %.0fs", idle, timeout)
                     await reset_core("timeout")

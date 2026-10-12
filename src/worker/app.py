@@ -8,6 +8,8 @@ Endpoints:
     GET  /health
     GET  /agents                    lista (?active=1 solo los vivos)
     GET  /usage                     último estado del límite de uso de la suscripción
+    GET  /settings                  ajustes en caliente del worker (valor efectivo y origen)
+    GET  /repos                     repos permitidos (los bare enganchados en /repos)
     POST /agents                    {"repo": str, "task": str, "mode": "read"|"code"}
     GET  /agents/{id}
     POST /agents/{id}/message       {"text": str, "by"?: str}
@@ -30,6 +32,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from src.worker import settings
 from src.worker.manager import manager_from_env
 
 _TOKEN = os.getenv("JARVIS_WORKER_TOKEN", "")
@@ -141,6 +144,18 @@ async def usage() -> dict:
     # "desconocido" hasta lanzar algo. Sondea aquí si la lectura es vieja (cada probe_every s).
     await manager.refresh_usage()
     return manager.usage()
+
+
+@app.get("/settings", dependencies=[Depends(_auth)])
+async def get_settings() -> list[dict]:
+    """Ajustes del worker editables en caliente. Solo lectura: los escribe el núcleo."""
+    return settings.describe("worker")
+
+
+@app.get("/repos", dependencies=[Depends(_auth)])
+async def get_repos() -> list[str]:
+    """Repos en los que se pueden lanzar agentes ahora mismo."""
+    return manager.allowed_repos
 
 
 @app.get("/metrics", dependencies=[Depends(_auth)])

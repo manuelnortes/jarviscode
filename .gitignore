@@ -36,3 +36,5 @@ docker-compose.override.yml
 
 # Copias de seguridad hechas a mano en el servidor antes de tocar config.
 *.bak-*
+# Carpeta por defecto de los repos de los agentes (JARVIS_AGENT_REPOS_DIR).
+agent-repos/

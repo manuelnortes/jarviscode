@@ -28,7 +28,9 @@ terminal, Claude Code, a script…) without talking to Jarvis by voice.
 
 1. A **task** ("encargo") covers **one** unchecked item of the project's `PLAN.md`. A code agent works on
    its own branch `agent/<id>-<slug>` cut from **`develop`** (created and synced with `main` automatically).
-2. When it finishes it leaves a **lightweight PR** (title, description, diffstat, test result).
+2. When it finishes it leaves a **lightweight PR** (title, description, diffstat). The worker runs the
+   project's test suite itself on the branch tip (no tokens spent); if it fails, it hands the output back
+   to the agent. Agents never edit `PLAN.md`: Vision ticks the item on `develop` after merging.
 3. Vision reviews it against the plan and either **merges it into `develop`**, asks the agent for
    changes, or flags it for you. After a merge it **launches the next item** of the plan.
 4. Agents' questions go to Vision first: it answers what the plan settles (or pure coordination,
@@ -36,7 +38,7 @@ terminal, Claude Code, a script…) without talking to Jarvis by voice.
 5. You review and merge **`develop` → `main`** yourself. Vision never touches the main branch.
 
 The safety rules are **in code, not in the prompt**: Vision's merge tool refuses anything that is not
-the integration branch or whose tests did not pass (`merge_guard`); merging or closing a PR on your
+the integration branch or whose suite is not green on the branch's current tip (`merge_guard`); merging or closing a PR on your
 behalf (`user_merge`, `user_close`) only works during the turn of one of *your* messages; and the
 worker's user can only push `agent/*` branches (`pre-receive` hook).
 
@@ -51,9 +53,9 @@ Today Vision runs **inside the Jarvis core process**, so you still start the `ja
 with nothing else: no voice models, no other capabilities.
 
 1. Follow [Agents setup](../README.md#agents-setup) (worker container, token, repos, `agent_repo_setup.sh`).
-2. Mount the **bare repos** in the core: Vision reads each `PLAN.md` from there (from `develop` if it
-   exists) and the core merges PRs, so each agent repo must be writable (see
-   `docker-compose.override.example.yml`).
+2. Mount the **bare repos** in the core read-only (`JARVIS_GIT_ROOT`): Vision reads each `PLAN.md` from
+   there (from `develop` if it exists). The agent repos themselves are the ones in
+   `JARVIS_AGENT_REPOS_DIR`, mounted writable at `/repos` in the core and the worker by the compose.
 3. In `.env`:
 
    ```bash
@@ -62,7 +64,7 @@ with nothing else: no voice models, no other capabilities.
    JARVIS_STT_PRELOAD=0                 # do not load Whisper/Piper (~2 GB of RAM saved)
    JARVIS_AGENTS_URL=http://127.0.0.1:8113
    JARVIS_WORKER_TOKEN=<random>
-   JARVIS_AGENT_REPOS=my-repo
+   JARVIS_AGENT_REPOS_DIR=/srv/agent-repos   # one bare (or bind mount) per allowed repo
    JARVIS_GIT_ROOT=/opt/git             # where the bare repos are mounted in the core
    JARVIS_INTEGRATION_BRANCH=develop
    JARVIS_AGENTS_MAX=1                  # start with one agent at a time
@@ -105,7 +107,9 @@ Read-only endpoints (no Opus involved):
 | `GET /api/prs` · `GET /api/prs/{id}` | core | PRs, and one PR with its full diff |
 | `POST /api/prs/{id}/merge` · `/close` | core | Merge or close a PR directly, bypassing Vision |
 | `GET /usage` | worker | Last known usage of the 5-hour and weekly windows |
-| `GET /metrics?last=50` | worker | Per-turn cost, tokens and usage before/after, with a summary |
+| `GET /metrics?last=50` | worker | Agents only: per-turn tokens, cost and usage before/after, with a summary |
+| `GET` · `PUT /api/settings` | core | Live settings (the ⚙ panel of the web): effective value, origin and when it applies; `PUT {"KEY": value \| null}`, all or nothing |
+| `GET /api/metrics?tasks=20` | core | Spend in tokens of agents and Vision, per task (launch → agent → review/merge, wall time) and per Vision turn; `$` only as a reference |
 
 The worker listens on `127.0.0.1` only and needs the `X-Jarvis-Token` header. The core has no
 authentication of its own: keep it on the LAN or behind a reverse proxy with SSO.
@@ -122,11 +126,14 @@ These are the rules that made the first real project work (10 agents, 7 PRs merg
 3. **Real contracts.** If a task consumes an API, the plan (or the task) must give the real field names or
    a recorded real response; environment variables with their exact name from `.env.example`. The one
    agent that had to guess invented a contract and its PR was thrown away.
-4. **Tests are the gate.** A PR without passing tests is never merged; ask for tests to be registered
-   (e.g. in `docs/tests.md`) before accepting a feature.
+4. **The suite is the gate; new tests are the exception.** A PR is merged only if the existing suite is
+   green on its exact commit, run by the system, not reported by the agent. Agents add no tests unless
+   Vision asks for one, and then a minimal one added to the existing suite: big test files and tests that
+   pin hand-edited data cost a lot of usage and catch little.
 5. **`develop` is Vision's, `main` is yours.** Review `develop` → `main` by hand when a phase is done.
-6. **Budget the subscription.** Agents and Vision spend from the same Claude subscription as you.
-   Keep `JARVIS_AGENTS_MAX` low at first, set `JARVIS_AGENT_USAGE_LIMIT`, and check `/metrics`: in our
+6. **Budget the account.** Agents, Vision and Jarvis spend from the Claude account of the token you give
+   Jarvis (and so do your own Claude sessions if they use the same account).
+   Keep `JARVIS_AGENTS_MAX` low at first, set `JARVIS_AGENT_USAGE_LIMIT`, and check `/api/metrics`: in our
    runs a task cost **$0.4–1**.
    Checkpoints (`JARVIS_AGENT_CHECKPOINT`, default every +5 % of the window) make long agents stop,
    estimate what is left and ask Vision to cut the scope.
